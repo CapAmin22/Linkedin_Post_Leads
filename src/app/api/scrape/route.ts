@@ -10,8 +10,18 @@ export async function POST(request: Request) {
     const supabase = await createClient();
 
     // Key Validation Diagnostics
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     const triggerKey = process.env.TRIGGER_API_KEY;
+
+    if (!supabaseUrl || !supabaseKey || !triggerKey) {
+      console.error("Missing critical environment variables:", { supabaseUrl: !!supabaseUrl, supabaseKey: !!supabaseKey, triggerKey: !!triggerKey });
+      return NextResponse.json({ 
+        error: "Configuration Error", 
+        details: "One or more API keys are missing in the environment. Check your Vercel settings.",
+        missing: { supabaseUrl: !supabaseUrl, supabaseKey: !supabaseKey, triggerKey: !triggerKey }
+      }, { status: 500 });
+    }
 
     if (supabaseKey && !supabaseKey.startsWith("eyJ")) {
       console.warn("WARNING: NEXT_PUBLIC_SUPABASE_ANON_KEY does not look like a standard Supabase JWT key.");
