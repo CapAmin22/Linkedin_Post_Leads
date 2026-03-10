@@ -64,8 +64,8 @@ export const scrapeLeadsTask = task({
 
     let profiles: ApifyProfile[] = [];
     try {
-      const run = await apify.actor("curious_coder/linkedin-post-likers").call({
-        postUrls: [url],
+      const run = await apify.actor("curious_coder/linkedin-post-reactions-scraper").call({
+        postUrl: url,
         maxItems: 100,
       });
 
@@ -177,6 +177,33 @@ ${headlines}`;
           }
         } catch (error) {
           logger.warn(`Apollo enrichment failed for ${fullName}`, { error });
+        }
+      }
+
+      // Fallback to Hunter if Apollo fails to find an email or is not configured
+      if (!email && fullName && company && process.env.HUNTER_API_KEY) {
+        try {
+          const nameParts = fullName.split(" ");
+          const firstName = nameParts[0] || "";
+          const lastName = nameParts.slice(1).join(" ") || "";
+
+          // We'll roughly "guess" the domain from the company name by removing spaces to improve Hunter accuracy
+          const domain = company.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
+
+          const hunterRes = await fetch(
+            `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(
+              domain
+            )}&first_name=${encodeURIComponent(firstName)}&last_name=${encodeURIComponent(
+              lastName
+            )}&api_key=${process.env.HUNTER_API_KEY}`
+          );
+
+          if (hunterRes.ok) {
+            const hunterData = await hunterRes.json();
+            email = hunterData.data?.email || null;
+          }
+        } catch (error) {
+          logger.warn(`Hunter enrichment failed for ${fullName}`, { error });
         }
       }
 

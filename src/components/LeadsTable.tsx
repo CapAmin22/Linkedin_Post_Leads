@@ -11,6 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -67,6 +68,35 @@ export default function LeadsTable({ activeJobId }: LeadsTableProps) {
     return () => clearInterval(interval);
   }, [activeJobId, fetchLeads]);
 
+  const exportToCsv = () => {
+    if (leads.length === 0) return;
+    
+    // Define headers
+    const headers = ["Name", "Job Title", "Company", "Email", "LinkedIn URL", "Status"];
+    
+    // Map leads to CSV rows
+    const csvRows = leads.map(lead => [
+      `"${(lead.full_name || "").replace(/"/g, '""')}"`,
+      `"${(lead.job_title || lead.headline || "").replace(/"/g, '""')}"`,
+      `"${(lead.company || "").replace(/"/g, '""')}"`,
+      `"${(lead.email || "").replace(/"/g, '""')}"`,
+      `"${(lead.linkedin_url || "").replace(/"/g, '""')}"`,
+      `"${lead.status}"`
+    ].join(","));
+    
+    // Combine headers and rows
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...csvRows].join("\n");
+    
+    // Create download link
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `leads_export_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const statusBadge = (status: string) => {
     switch (status) {
       case "completed":
@@ -109,12 +139,26 @@ export default function LeadsTable({ activeJobId }: LeadsTableProps) {
                 : `${leads.length} lead${leads.length !== 1 ? "s" : ""} found`}
             </CardDescription>
           </div>
-          {activeJobId && (
+          {activeJobId ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <div className="h-2 w-2 rounded-full bg-chart-1 animate-pulse" />
               Live updating
             </div>
-          )}
+          ) : leads.length > 0 ? (
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={exportToCsv}
+              className="hidden sm:flex"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2 h-4 w-4">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              Export CSV
+            </Button>
+          ) : null}
         </div>
       </CardHeader>
       <CardContent>
