@@ -1,7 +1,7 @@
 import { defineConfig } from "@trigger.dev/sdk/v3";
 
 export default defineConfig({
-  project: "linkedin-post-leads",
+  project: "proj_fbrnmqgatnqgidptkxqa",
   dirs: ["./src/trigger"],
   maxDuration: 600,
 });
