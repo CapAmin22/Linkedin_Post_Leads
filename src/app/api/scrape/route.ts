@@ -15,6 +15,7 @@ export async function POST(request: Request) {
     if (authError || !user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+    // const user = { id: 'test-user-id' }; // Removed duplicate mock user
 
     // Validate the request body
     const body = await request.json();
@@ -44,10 +45,10 @@ export async function POST(request: Request) {
     );
 
     return NextResponse.json({ jobId: handle.id }, { status: 200 });
-  } catch (error) {
-    console.error("Scrape API error:", error);
+  } catch (error: any) {
+    console.error("Scrape API error details:", error);
     return NextResponse.json(
-      { error: "Internal server error" },
+      { error: "Internal server error", details: error?.message, stack: error?.stack },
       { status: 500 }
     );
   }
