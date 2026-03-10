@@ -55,6 +55,7 @@ export default function LeadsTable({ activeJobId }: LeadsTableProps) {
   }, [supabase]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchLeads();
   }, [fetchLeads]);
 

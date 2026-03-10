@@ -33,12 +33,14 @@ const statusConfig: Record<
 
 export default function JobStatusBadge({ jobId }: JobStatusBadgeProps) {
   const [status, setStatus] = useState<JobStatus | null>(null);
-  const [polling, setPolling] = useState(false);
 
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setStatus(null);
+      return;
+    }
 
-    setPolling(true);
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`/api/job-status?jobId=${jobId}`);
@@ -47,7 +49,6 @@ export default function JobStatusBadge({ jobId }: JobStatusBadgeProps) {
           setStatus(data.status);
           // Stop polling on terminal states
           if (["COMPLETED", "FAILED", "CANCELED", "SYSTEM_FAILURE"].includes(data.status)) {
-            setPolling(false);
             clearInterval(interval);
           }
         }
@@ -60,6 +61,9 @@ export default function JobStatusBadge({ jobId }: JobStatusBadgeProps) {
   }, [jobId]);
 
   if (!jobId || !status) return null;
+
+  const isTerminal = ["COMPLETED", "FAILED", "CANCELED", "SYSTEM_FAILURE"].includes(status);
+  const polling = !isTerminal;
 
   const config = statusConfig[status] || {
     label: status,
