@@ -27,11 +27,10 @@ interface EnrichedLead {
   status: string;
 }
 
-export interface PipelineResult {
-  success: boolean;
-  leadsProcessed: number;
-  error?: string;
-  steps: string[];
+export interface PipelineEvent {
+  type: "step" | "error" | "done";
+  message: string;
+  data?: Record<string, unknown>;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -66,10 +65,8 @@ async function enrichSingleProfile(
     `${profile.firstName || ""} ${profile.lastName || ""}`.trim();
   const company = parsed?.company || "";
   const jobTitle = parsed?.jobTitle || profile.headline || "";
-
   let email: string | null = null;
 
-  // Try Apollo
   if (fullName && company && process.env.APOLLO_API_KEY) {
     try {
       const nameParts = fullName.split(" ");
@@ -94,11 +91,10 @@ async function enrichSingleProfile(
         email = data.person?.email || null;
       }
     } catch {
-      // timeout or error — continue
+      /* timeout — continue */
     }
   }
 
-  // Fallback: Hunter
   if (!email && fullName && company && process.env.HUNTER_API_KEY) {
     try {
       const nameParts = fullName.split(" ");
@@ -111,7 +107,7 @@ async function enrichSingleProfile(
         email = data.data?.email || null;
       }
     } catch {
-      // timeout or error — continue
+      /* timeout — continue */
     }
   }
 
@@ -130,7 +126,6 @@ async function enrichSingleProfile(
   };
 }
 
-// Run N promises with concurrency limit
 async function parallelLimit<T>(
   tasks: (() => Promise<T>)[],
   concurrency: number
@@ -149,17 +144,33 @@ async function parallelLimit<T>(
   return results;
 }
 
-// ─── Main Pipeline ────────────────────────────────────────────────────
+// ─── Main Pipeline (streaming via callback) ───────────────────────────
 
 export async function runPipeline(
   postUrl: string,
-  userId: string
-): Promise<PipelineResult> {
-  const steps: string[] = [];
+  userId: string,
+  onEvent: (event: PipelineEvent) => void
+): Promise<void> {
   const supabase = getSupabaseAdmin();
 
-  // ── Step 1: Apify — scrape post reactions ──────────────────────────
-  steps.push("Starting Apify scrape...");
+  // ── Env check ──────────────────────────────────────────────────────
+  const missingVars: string[] = [];
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) missingVars.push("NEXT_PUBLIC_SUPABASE_URL");
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missingVars.push("SUPABASE_SERVICE_ROLE_KEY");
+  if (!process.env.APIFY_API_TOKEN) missingVars.push("APIFY_API_TOKEN");
+  if (!process.env.GEMINI_API_KEY) missingVars.push("GEMINI_API_KEY");
+
+  if (missingVars.length > 0) {
+    onEvent({
+      type: "error",
+      message: `Missing environment variables: ${missingVars.join(", ")}. Set them in Vercel → Settings → Environment Variables.`,
+    });
+    return;
+  }
+
+  // ── Step 1: Apify ──────────────────────────────────────────────────
+  onEvent({ type: "step", message: "🔍 Step 1/4 — Scraping LinkedIn post reactions with Apify..." });
+
   const apify = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
   let profiles: ApifyProfile[] = [];
 
@@ -170,21 +181,30 @@ export async function runPipeline(
 
     const { items } = await apify.dataset(run.defaultDatasetId).listItems();
     profiles = items as unknown as ApifyProfile[];
-    steps.push(`Apify returned ${profiles.length} profiles`);
+    onEvent({
+      type: "step",
+      message: `✅ Apify found ${profiles.length} reactor${profiles.length !== 1 ? "s" : ""}`,
+      data: { count: profiles.length },
+    });
   } catch (error: any) {
-    steps.push(`Apify failed: ${error?.message}`);
-    return { success: false, leadsProcessed: 0, error: `Apify failed: ${error?.message}`, steps };
+    const msg = error?.message || String(error);
+    onEvent({
+      type: "error",
+      message: `❌ Apify scraping failed: ${msg}. Check if your APIFY_API_TOKEN is valid and the LinkedIn URL is a post URL.`,
+      data: { errorDetail: msg },
+    });
+    return;
   }
 
   if (profiles.length === 0) {
-    steps.push("No profiles found for this post");
-    return { success: true, leadsProcessed: 0, steps };
+    onEvent({ type: "done", message: "⚠️ No reactors found on this post. Try a different post URL.", data: { leadsProcessed: 0 } });
+    return;
   }
 
-  // ── Step 2: Gemini — parse job titles (single batch) ───────────────
-  steps.push("Parsing headlines with Gemini...");
-  const parsedTitles: Map<number, ParsedTitle> = new Map();
+  // ── Step 2: Gemini ────────────────────────────────────────────────
+  onEvent({ type: "step", message: "🤖 Step 2/4 — Parsing job titles with Gemini AI..." });
 
+  const parsedTitles: Map<number, ParsedTitle> = new Map();
   try {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
@@ -210,23 +230,28 @@ ${headlines}`
     parsed.forEach((item) => {
       parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company });
     });
-    steps.push(`Gemini parsed ${parsedTitles.size} titles`);
+    onEvent({ type: "step", message: `✅ Gemini parsed ${parsedTitles.size} job titles` });
   } catch (error: any) {
-    steps.push(`Gemini parsing failed (continuing): ${error?.message}`);
+    onEvent({ type: "step", message: `⚠️ Gemini parsing failed (${error?.message}), continuing without parsed titles...` });
   }
 
-  // ── Step 3: Enrich with emails — 5 concurrent ─────────────────────
-  steps.push(`Enriching ${profiles.length} leads (parallel)...`);
+  // ── Step 3: Email Enrichment ──────────────────────────────────────
+  onEvent({ type: "step", message: `📧 Step 3/4 — Enriching ${profiles.length} leads with emails (Apollo + Hunter)...` });
+
   const enrichmentTasks = profiles.map(
     (profile, i) => () => enrichSingleProfile(profile, parsedTitles.get(i))
   );
   const enrichedLeads = await parallelLimit(enrichmentTasks, 5);
 
   const emailCount = enrichedLeads.filter((l) => l.email).length;
-  steps.push(`Enriched ${enrichedLeads.length} leads (${emailCount} emails found)`);
+  onEvent({
+    type: "step",
+    message: `✅ Enriched ${enrichedLeads.length} leads — ${emailCount} email${emailCount !== 1 ? "s" : ""} found`,
+  });
 
-  // ── Step 4: Save to Supabase ───────────────────────────────────────
-  steps.push("Saving to database...");
+  // ── Step 4: Save to Supabase ──────────────────────────────────────
+  onEvent({ type: "step", message: "💾 Step 4/4 — Saving leads to database..." });
+
   const leadsToInsert = enrichedLeads.map((lead) => ({
     user_id: userId,
     source_url: postUrl,
@@ -238,10 +263,17 @@ ${headlines}`
     .insert(leadsToInsert);
 
   if (insertError) {
-    steps.push(`Database insert failed: ${insertError.message}`);
-    return { success: false, leadsProcessed: 0, error: insertError.message, steps };
+    onEvent({
+      type: "error",
+      message: `❌ Database save failed: ${insertError.message}. Check your Supabase table schema and service_role key.`,
+      data: { errorDetail: insertError.message, code: insertError.code },
+    });
+    return;
   }
 
-  steps.push("Pipeline complete!");
-  return { success: true, leadsProcessed: enrichedLeads.length, steps };
+  onEvent({
+    type: "done",
+    message: `🎉 Done! ${enrichedLeads.length} leads extracted and saved (${emailCount} with emails).`,
+    data: { leadsProcessed: enrichedLeads.length, emailsFound: emailCount },
+  });
 }

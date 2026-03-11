@@ -1,34 +1,86 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
 
 export async function GET() {
-  const status: any = {
-    supabase: { status: "unchecked", url: process.env.NEXT_PUBLIC_SUPABASE_URL },
-    trigger: { status: "unchecked", keyFormat: "unknown" },
-    gemini: { status: "unchecked" },
-    apify: { status: "unchecked" },
+  const results: Record<string, { status: string; detail?: string }> = {};
+
+  // 1. Check Supabase
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  results.supabase_url = { status: supabaseUrl ? "✅ Set" : "❌ Missing" };
+  results.supabase_anon_key = {
+    status: supabaseAnonKey?.startsWith("eyJ") ? "✅ Valid JWT" : "❌ Invalid",
+    detail: supabaseAnonKey ? `${supabaseAnonKey.slice(0, 20)}...` : "MISSING",
+  };
+  results.supabase_service_role_key = {
+    status: serviceRoleKey?.startsWith("eyJ") ? "✅ Valid JWT" : "❌ Invalid",
+    detail: serviceRoleKey ? `${serviceRoleKey.slice(0, 20)}...` : "MISSING",
   };
 
-  try {
-    // 1. Check Supabase Keys
-    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-    
-    status.supabase.anonKeyValid = anonKey.startsWith("eyJ");
-    status.supabase.serviceKeySet = serviceKey !== "YOUR_SUPABASE_SERVICE_ROLE_KEY_HERE" && serviceKey.length > 20;
-    
-    // 2. Check Trigger Key
-    const triggerKey = process.env.TRIGGER_SECRET_KEY || "";
-    status.trigger.type = triggerKey.startsWith("tr_dev_") ? "Dev Secret (OK for local)" : triggerKey.startsWith("tr_prod_") ? "Prod Secret (Correct)" : "Invalid";
-    
-    // 3. Test Supabase Connection
-    const supabase = await createClient();
-    const { error: authError } = await supabase.auth.getSession();
-    status.supabase.status = authError ? "error" : "connected";
-    status.supabase.error = authError?.message;
+  // 2. Check Apify
+  const apifyToken = process.env.APIFY_API_TOKEN;
+  results.apify_token = {
+    status: apifyToken && apifyToken.length > 10 ? "✅ Set" : "❌ Missing",
+    detail: apifyToken ? `${apifyToken.slice(0, 15)}...` : "MISSING",
+  };
 
-    return NextResponse.json(status);
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message, stack: error.stack }, { status: 500 });
+  // 3. Check Gemini
+  const geminiKey = process.env.GEMINI_API_KEY;
+  results.gemini_key = {
+    status: geminiKey && geminiKey.startsWith("AIza") ? "✅ Set" : "❌ Missing or Invalid",
+    detail: geminiKey ? `${geminiKey.slice(0, 15)}...` : "MISSING",
+  };
+
+  // 4. Check Apollo
+  const apolloKey = process.env.APOLLO_API_KEY;
+  results.apollo_key = {
+    status: apolloKey && apolloKey.length > 5 ? "✅ Set" : "⚠️ Missing (optional)",
+  };
+
+  // 5. Check Hunter
+  const hunterKey = process.env.HUNTER_API_KEY;
+  results.hunter_key = {
+    status: hunterKey && hunterKey.length > 10 ? "✅ Set" : "⚠️ Missing (optional)",
+  };
+
+  // 6. Quick Supabase connection test
+  if (supabaseUrl && supabaseAnonKey?.startsWith("eyJ")) {
+    try {
+      const res = await fetch(`${supabaseUrl}/rest/v1/scraped_leads?select=count&limit=1`, {
+        headers: {
+          apikey: supabaseAnonKey,
+          Authorization: `Bearer ${supabaseAnonKey}`,
+        },
+      });
+      results.supabase_connection = {
+        status: res.ok ? "✅ Connected" : `❌ HTTP ${res.status}`,
+        detail: res.ok ? "Table accessible" : await res.text(),
+      };
+    } catch (error: any) {
+      results.supabase_connection = {
+        status: "❌ Connection failed",
+        detail: error?.message,
+      };
+    }
   }
+
+  // 7. Quick Apify test
+  if (apifyToken) {
+    try {
+      const res = await fetch("https://api.apify.com/v2/acts?limit=1", {
+        headers: { Authorization: `Bearer ${apifyToken}` },
+      });
+      results.apify_connection = {
+        status: res.ok ? "✅ Connected" : `❌ HTTP ${res.status} (bad token?)`,
+      };
+    } catch (error: any) {
+      results.apify_connection = {
+        status: "❌ Connection failed",
+        detail: error?.message,
+      };
+    }
+  }
+
+  return NextResponse.json(results);
 }

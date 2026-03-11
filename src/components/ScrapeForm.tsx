@@ -11,6 +11,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
+interface PipelineEvent {
+  type: "step" | "error" | "done";
+  message: string;
+  data?: Record<string, unknown>;
+}
+
 interface ScrapeFormProps {
   onComplete: (leadsProcessed: number) => void;
 }
@@ -19,16 +25,15 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [statusText, setStatusText] = useState<string | null>(null);
+  const [steps, setSteps] = useState<PipelineEvent[]>([]);
 
-  const isValidLinkedInUrl = (url: string) => {
-    return /^https?:\/\/(www\.)?linkedin\.com\//.test(url);
-  };
+  const isValidLinkedInUrl = (u: string) =>
+    /^https?:\/\/(www\.)?linkedin\.com\//.test(u);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setStatusText(null);
+    setSteps([]);
 
     if (!isValidLinkedInUrl(url)) {
       setError("Please enter a valid LinkedIn URL");
@@ -36,7 +41,7 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
     }
 
     setLoading(true);
-    setStatusText("Extracting leads... this takes 15-30 seconds");
+    setSteps([{ type: "step", message: "⏳ Starting pipeline..." }]);
 
     try {
       const res = await fetch("/api/scrape", {
@@ -45,25 +50,79 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
         body: JSON.stringify({ url }),
       });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || data.details || "Failed to extract leads");
+      // If the response is not a stream (error before streaming started)
+      const contentType = res.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const data = await res.json();
+        throw new Error(data.error || data.details || "Failed to start pipeline");
       }
 
-      setStatusText(`Done! ${data.leadsProcessed} leads extracted.`);
-      onComplete(data.leadsProcessed);
-      setUrl("");
+      if (!res.body) {
+        throw new Error("No response stream received");
+      }
 
-      // Clear success message after 5s
-      setTimeout(() => setStatusText(null), 5000);
+      // Read SSE stream
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let leadsProcessed = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const payload = line.slice(6).trim();
+            if (payload === "[DONE]") continue;
+
+            try {
+              const event: PipelineEvent = JSON.parse(payload);
+              setSteps((prev) => [...prev, event]);
+
+              if (event.type === "error") {
+                setError(event.message);
+              }
+
+              if (event.type === "done" && event.data?.leadsProcessed) {
+                leadsProcessed = event.data.leadsProcessed as number;
+              }
+            } catch {
+              // Skip malformed SSE data
+            }
+          }
+        }
+      }
+
+      if (leadsProcessed > 0) {
+        onComplete(leadsProcessed);
+        setUrl("");
+      }
     } catch (err: unknown) {
       const errorMessage =
         err instanceof Error ? err.message : "Something went wrong";
       setError(errorMessage);
-      setStatusText(null);
+      setSteps((prev) => [
+        ...prev,
+        { type: "error", message: `❌ ${errorMessage}` },
+      ]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const getStepColor = (type: string) => {
+    switch (type) {
+      case "error":
+        return "text-red-400";
+      case "done":
+        return "text-emerald-400 font-medium";
+      default:
+        return "text-muted-foreground";
     }
   };
 
@@ -152,20 +211,31 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
           </Button>
         </form>
 
-        {/* Status / progress text */}
-        {statusText && !error && (
-          <div className="mt-3 rounded-lg bg-primary/10 border border-primary/20 p-3 text-sm text-primary flex items-center gap-2">
+        {/* Real-time pipeline progress */}
+        {steps.length > 0 && (
+          <div className="mt-4 rounded-lg bg-muted/30 border border-border/50 p-4 space-y-1.5 max-h-64 overflow-y-auto">
+            <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+              Pipeline Progress
+            </div>
+            {steps.map((step, i) => (
+              <div
+                key={i}
+                className={`text-sm font-mono leading-relaxed ${getStepColor(step.type)}`}
+              >
+                {step.message}
+              </div>
+            ))}
             {loading && (
-              <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <div className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+                Running...
+              </div>
             )}
-            {statusText}
           </div>
         )}
 
-        {error && (
+        {/* Error summary (only if NOT already in steps) */}
+        {error && steps.length === 0 && (
           <div className="mt-3 rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
             {error}
           </div>
