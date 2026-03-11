@@ -540,16 +540,18 @@ export async function runPipeline(
       if (deepItems.length > 0) {
           deepDiveUsed = true;
           profiles.forEach((p, i) => {
-              const pCleanUrl = p.linkedinUrl.replace(/\/$/, ""); // Trim trailing slash
+              const pCleanUrl = p.linkedinUrl.split('?')[0].replace(/\/$/, "").toLowerCase();
               const matched = deepItems.find(d => {
                  if (!d) return false;
-                 const dUrl1 = (d.linkedinUrl || "").replace(/\/$/, "");
-                 const dUrl2 = (d.url || "").replace(/\/$/, "");
-                 const dUrl3 = (d.profileUrl || "").replace(/\/$/, "");
+                 const dUrl1 = (d.linkedinUrl || "").split('?')[0].replace(/\/$/, "").toLowerCase();
+                 const dUrl2 = (d.url || "").split('?')[0].replace(/\/$/, "").toLowerCase();
+                 const dUrl3 = (d.profileUrl || "").split('?')[0].replace(/\/$/, "").toLowerCase();
+                 const pId = d.publicIdentifier ? d.publicIdentifier.toLowerCase() : "";
+                 
                  return (dUrl1 && pCleanUrl.includes(dUrl1)) || 
                         (dUrl2 && pCleanUrl.includes(dUrl2)) || 
                         (dUrl3 && pCleanUrl.includes(dUrl3)) || 
-                        (d.publicIdentifier && pCleanUrl.includes(d.publicIdentifier));
+                        (pId && pCleanUrl.includes(pId));
               });
               // Bypass error objects returned from actors locking out free tier via API
               if (matched && !matched.error) {
