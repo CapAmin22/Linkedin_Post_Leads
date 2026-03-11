@@ -151,14 +151,15 @@ function fallbackRegexParse(headline: string): ParsedTitle {
 
 function buildPrompt(headlines: string): string {
   return `Goal: Extract professional details from LinkedIn headlines.
-Input: A list of headlines.
+Input: A numbered list of headlines.
 Task: For each headline, extract the "Job Title" and the "Company Name".
-Output: Return a JSON object with a "results" key containing an array where each element has: {"index": <number>, "jobTitle": "<string>", "company": "<string>"}.
+Output: Return a JSON object with a "results" key containing an array. Each element MUST have: {"index": <number>, "jobTitle": "<string>", "company": "<string>"}.
 
 Rules:
-1. If the company is mentioned with "@", "at", " | ", " - ", or ",", extract it.
-2. If company is not found, use an empty string.
-3. Return ONLY valid JSON. No text outside the JSON.
+1. The "index" in your JSON MUST exactly match the number preceding the headline in the input.
+2. If the company is mentioned with "@", "at", " | ", " - ", or ",", extract it.
+3. If company is not found, use an empty string.
+4. Return ONLY valid JSON. No text outside the JSON.
 
 Headlines:
 ${headlines}`;
@@ -483,7 +484,7 @@ export async function runPipeline(
 
   const parsedTitles: Map<number, ParsedTitle> = new Map();
   const headlines = profiles
-    .map((p, i) => `${i + 1}. "${p.headline || "N/A"}"`)
+    .map((p, i) => `${i}. "${p.headline || "N/A"}"`)
     .join("\n");
   const prompt = buildPrompt(headlines);
 
@@ -494,7 +495,11 @@ export async function runPipeline(
     try {
       const text = await parseWithGroq(prompt);
       const parsed = extractParsedArray(text);
-      parsed.forEach((item) => parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company }));
+      parsed.forEach((item) => {
+        if (item.index !== undefined) {
+          parsedTitles.set(item.index, { jobTitle: item.jobTitle, company: item.company });
+        }
+      });
       aiUsed = "Groq";
       onEvent({ type: "step", message: `✅ Groq parsed ${parsedTitles.size} job titles` });
     } catch (err: any) {
@@ -510,7 +515,9 @@ export async function runPipeline(
     try {
       const text = await parseWithGemini(prompt);
       const parsed = extractParsedArray(text);
-      parsed.forEach((item) => parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company }));
+      parsed.forEach((item) => {
+        if (item.index !== undefined) parsedTitles.set(item.index, { jobTitle: item.jobTitle, company: item.company });
+      });
       aiUsed = "Gemini";
       onEvent({ type: "step", message: `✅ Gemini parsed ${parsedTitles.size} job titles` });
     } catch (err: any) {
@@ -527,7 +534,9 @@ export async function runPipeline(
     try {
       const text = await parseWithOpenAI(prompt);
       const parsed = extractParsedArray(text);
-      parsed.forEach((item) => parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company }));
+      parsed.forEach((item) => {
+        if (item.index !== undefined) parsedTitles.set(item.index, { jobTitle: item.jobTitle, company: item.company });
+      });
       aiUsed = "OpenAI";
       onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
     } catch (err: any) {
