@@ -543,10 +543,11 @@ export async function runPipeline(
                   d.profileUrl === p.linkedinUrl || 
                   (d.publicIdentifier && p.linkedinUrl.includes(d.publicIdentifier))
               );
-              if (matched) {
+              // Bypass error objects returned from actors locking out free tier via API
+              if (matched && !matched.error) {
                   const company = matched.company || matched.companyName || matched.experiences?.[0]?.company || matched.experience?.[0]?.companyName || "";
-                  const jobTitle = matched.jobTitle || matched.headline || matched.experiences?.[0]?.title || matched.experience?.[0]?.title || "";
-                  const companyUrl = matched.companyUrl || matched.experiences?.[0]?.companyUrl || matched.experience?.[0]?.companyUrl || "";
+                  const jobTitle = matched.jobTitle || matched.headline || matched.experiences?.[0]?.title || matched.experience?.[0]?.position || "";
+                  const companyUrl = matched.companyUrl || matched.experiences?.[0]?.companyUrl || matched.experience?.[0]?.companyLinkedinUrl || "";
                   if (company || jobTitle) {
                       parsedTitles.set(i, { jobTitle, company, companyUrl });
                   }
