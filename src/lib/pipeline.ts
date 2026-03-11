@@ -63,6 +63,50 @@ async function fetchWithTimeout(
   }
 }
 
+async function retryFetch(
+  url: string,
+  options: RequestInit,
+  maxRetries = 2,
+  delay = 1000
+): Promise<Response> {
+  let lastError: any;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const res = await fetchWithTimeout(url, options);
+      if (res.status === 429 && i < maxRetries) {
+        // Wait and retry on 429
+        await new Promise((r) => setTimeout(r, delay * Math.pow(2, i)));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      if (i === maxRetries) throw err;
+      await new Promise((r) => setTimeout(r, delay * Math.pow(2, i)));
+    }
+  }
+  throw lastError;
+}
+
+function fallbackRegexParse(headline: string): ParsedTitle {
+  // Common LinkedIn patterns:
+  // "Software Engineer at Google"
+  // "Founder @ Startup"
+  // "Product Manager | Meta"
+  // "CEO - Acme Corp"
+  
+  const atMatch = headline.match(/(.+) (?:at|@) (.+)/i);
+  if (atMatch) return { jobTitle: atMatch[1].trim(), company: atMatch[2].trim() };
+  
+  const pipeMatch = headline.match(/(.+) [|] (.+)/);
+  if (pipeMatch) return { jobTitle: pipeMatch[1].trim(), company: pipeMatch[2].trim() };
+  
+  const dashMatch = headline.match(/(.+) - (.+)/);
+  if (dashMatch) return { jobTitle: dashMatch[1].trim(), company: dashMatch[2].trim() };
+
+  return { jobTitle: headline, company: "" };
+}
+
 async function enrichSingleProfile(
   profile: ApifyProfile,
   parsed: ParsedTitle | undefined
@@ -267,7 +311,7 @@ Rules:
 Headlines:
 ${headlines}`;
 
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await retryFetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -295,10 +339,11 @@ ${headlines}`;
     
     if (Array.isArray(rawJson)) {
       parsed = rawJson;
+    } else if (rawJson.data && Array.isArray(rawJson.data)) {
+      parsed = rawJson.data;
     } else if (rawJson.results && Array.isArray(rawJson.results)) {
       parsed = rawJson.results;
     } else {
-      // Sometimes it wraps it in an object like { "data": [...] }
       const firstKey = Object.keys(rawJson)[0];
       if (Array.isArray(rawJson[firstKey])) {
         parsed = rawJson[firstKey];
@@ -310,7 +355,16 @@ ${headlines}`;
     });
     onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
   } catch (error: any) {
-    onEvent({ type: "step", message: `⚠️ OpenAI parsing failed (${error?.message}), continuing without parsed titles...` });
+    onEvent({ type: "step", message: `⚠️ OpenAI failed (${error?.message}). Using Lead-Engineer Regex Fallback...` });
+    
+    // Manual fallback for each profile
+    profiles.forEach((p, i) => {
+      const headline = p.headline || p.reactor?.headline || "";
+      if (headline) {
+        parsedTitles.set(i, fallbackRegexParse(headline));
+      }
+    });
+    onEvent({ type: "step", message: `✅ Fallback extracted ${parsedTitles.size} titles from headlines` });
   }
 
   // ── Step 3: Email Enrichment ──────────────────────────────────────
