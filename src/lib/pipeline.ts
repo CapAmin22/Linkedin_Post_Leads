@@ -9,6 +9,13 @@ interface ApifyProfile {
   headline?: string;
   profileUrl?: string;
   publicIdentifier?: string;
+  // Support for apimaestro output format
+  reactor?: {
+    name?: string;
+    headline?: string;
+    profileUrl?: string;
+    photoUrl?: string;
+  };
 }
 
 interface ParsedTitle {
@@ -61,9 +68,13 @@ async function enrichSingleProfile(
 ): Promise<EnrichedLead> {
   const fullName =
     profile.fullName ||
+    profile.reactor?.name ||
     `${profile.firstName || ""} ${profile.lastName || ""}`.trim();
+  const headline = profile.headline || profile.reactor?.headline || "";
+  const profileUrl = profile.profileUrl || profile.reactor?.profileUrl || "";
+
   const company = parsed?.company || "";
-  const jobTitle = parsed?.jobTitle || profile.headline || "";
+  const jobTitle = parsed?.jobTitle || headline || "";
   let email: string | null = null;
 
   if (fullName && company && process.env.APOLLO_API_KEY) {
@@ -113,11 +124,11 @@ async function enrichSingleProfile(
   return {
     full_name: fullName,
     linkedin_url:
-      profile.profileUrl ||
+      profileUrl ||
       (profile.publicIdentifier
         ? `https://linkedin.com/in/${profile.publicIdentifier}`
         : ""),
-    headline: profile.headline || "",
+    headline: headline,
     job_title: jobTitle,
     company,
     email,
@@ -174,16 +185,16 @@ export async function runPipeline(
   let profiles: ApifyProfile[] = [];
 
   try {
-    // Switch to official Apify actor which is usually free/cheaper and more stable
-    const actorId = "apify~linkedin-post-reactions-scraper";
+    // Switch to a high-quality, free-credit-friendly actor (No Rental Fee)
+    const actorId = "apimaestro~linkedin-post-reactions";
     const runRes = await fetch(
       `https://api.apify.com/v2/acts/${actorId}/runs?token=${apifyToken}&waitForFinish=90`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          postUrl,
-          maxResults: 100, // Official actor uses maxResults instead of maxItems
+          post_urls: [postUrl],
+          limit: 100 
         }),
       }
     );
@@ -235,7 +246,7 @@ export async function runPipeline(
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const headlines = profiles
-      .map((p, i) => `${i + 1}. "${p.headline || "N/A"}"`)
+      .map((p, i) => `${i + 1}. "${p.headline || p.reactor?.headline || "N/A"}"`)
       .join("\n");
 
     const result = await model.generateContent(
