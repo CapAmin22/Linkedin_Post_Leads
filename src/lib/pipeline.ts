@@ -1,22 +1,10 @@
 import { createClient } from "@supabase/supabase-js";
 
 // ─── Types ────────────────────────────────────────────────────────────
-interface ApifyProfile {
-  fullName?: string;
-  firstName?: string;
-  lastName?: string;
-  headline?: string;
-  profileUrl?: string;
-  profile_url?: string; // Some actors use underscore
-  publicIdentifier?: string;
-  // Support for apimaestro output format
-  reactor?: {
-    name?: string;
-    headline?: string;
-    profileUrl?: string;
-    profile_url?: string;
-    photoUrl?: string;
-  };
+interface NormalizedProfile {
+  fullName: string;
+  headline: string;
+  linkedinUrl: string;
 }
 
 interface ParsedTitle {
@@ -52,7 +40,7 @@ function getSupabaseAdmin() {
 async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeoutMs = 8000
+  timeoutMs = 10000
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -67,14 +55,13 @@ async function retryFetch(
   url: string,
   options: RequestInit,
   maxRetries = 2,
-  delay = 1000
+  delay = 2000
 ): Promise<Response> {
   let lastError: any;
   for (let i = 0; i <= maxRetries; i++) {
     try {
-      const res = await fetchWithTimeout(url, options);
+      const res = await fetchWithTimeout(url, options, 15000);
       if (res.status === 429 && i < maxRetries) {
-        // Wait and retry on 429
         await new Promise((r) => setTimeout(r, delay * Math.pow(2, i)));
         continue;
       }
@@ -88,48 +75,183 @@ async function retryFetch(
   throw lastError;
 }
 
+// ─── Apify Data Normalizer ────────────────────────────────────────────
+// The apimaestro actor returns: { reaction_type, reactor: { name, headline, profile_url } }
+// Other actors might return flat: { fullName, headline, profileUrl }
+// This function handles both and returns a clean, flat array.
+
+function normalizeProfiles(
+  rawItems: Record<string, any>[],
+  onEvent: (event: PipelineEvent) => void
+): NormalizedProfile[] {
+  // Log the first raw item for diagnostics
+  if (rawItems.length > 0) {
+    const keys = Object.keys(rawItems[0]);
+    const hasReactor = "reactor" in rawItems[0];
+    onEvent({
+      type: "step",
+      message: `📋 Raw data shape: [${keys.join(", ")}]${hasReactor ? " (nested reactor format)" : " (flat format)"}`,
+    });
+  }
+
+  return rawItems
+    .map((item) => {
+      const reactor = item.reactor || {};
+
+      const fullName =
+        item.fullName ||
+        reactor.name ||
+        item.name ||
+        (item.firstName || item.lastName
+          ? `${item.firstName || ""} ${item.lastName || ""}`.trim()
+          : "");
+
+      const headline =
+        item.headline || reactor.headline || reactor.position || "";
+
+      const linkedinUrl =
+        item.profileUrl ||
+        item.profile_url ||
+        reactor.profileUrl ||
+        reactor.profile_url ||
+        reactor.url ||
+        (item.publicIdentifier
+          ? `https://linkedin.com/in/${item.publicIdentifier}`
+          : "");
+
+      return { fullName, headline, linkedinUrl };
+    })
+    .filter((p) => p.fullName || p.headline); // Skip empty entries
+}
+
+// ─── Regex Fallback Parser ────────────────────────────────────────────
+
 function fallbackRegexParse(headline: string): ParsedTitle {
-  // Common LinkedIn patterns:
   // "Software Engineer at Google"
-  // "Founder @ Startup"
-  // "Product Manager | Meta"
-  // "CEO - Acme Corp"
-  
-  const atMatch = headline.match(/(.+) (?:at|@) (.+)/i);
+  const atMatch = headline.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
   if (atMatch) return { jobTitle: atMatch[1].trim(), company: atMatch[2].trim() };
-  
-  const pipeMatch = headline.match(/(.+) [|] (.+)/);
+
+  // "Product Manager | Meta"
+  const pipeMatch = headline.match(/^(.+?)\s*\|\s*(.+)$/);
   if (pipeMatch) return { jobTitle: pipeMatch[1].trim(), company: pipeMatch[2].trim() };
-  
-  const dashMatch = headline.match(/(.+) - (.+)/);
+
+  // "CEO - Acme Corp"
+  const dashMatch = headline.match(/^(.+?)\s+-\s+(.+)$/);
   if (dashMatch) return { jobTitle: dashMatch[1].trim(), company: dashMatch[2].trim() };
+
+  // "Founder, TechStartup"
+  const commaMatch = headline.match(/^(.+?),\s+(.+)$/);
+  if (commaMatch) return { jobTitle: commaMatch[1].trim(), company: commaMatch[2].trim() };
 
   return { jobTitle: headline, company: "" };
 }
 
+// ─── AI Parsing: OpenAI → Gemini → Regex ──────────────────────────────
+
+function buildPrompt(headlines: string): string {
+  return `Goal: Extract professional details from LinkedIn headlines.
+Input: A list of headlines.
+Task: For each headline, extract the "Job Title" and the "Company Name".
+Output: Return a JSON object with a "results" key containing an array where each element has: {"index": <number>, "jobTitle": "<string>", "company": "<string>"}.
+
+Rules:
+1. If the company is mentioned with "@", "at", " | ", " - ", or ",", extract it.
+2. If company is not found, use an empty string.
+3. Return ONLY valid JSON. No text outside the JSON.
+
+Headlines:
+${headlines}`;
+}
+
+function extractParsedArray(text: string): { index: number; jobTitle: string; company: string }[] {
+  const jsonStr = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+  const rawJson = JSON.parse(jsonStr);
+
+  if (Array.isArray(rawJson)) return rawJson;
+
+  // OpenAI json_object mode wraps in an object
+  for (const key of Object.keys(rawJson)) {
+    if (Array.isArray(rawJson[key])) return rawJson[key];
+  }
+
+  return [];
+}
+
+async function parseWithOpenAI(prompt: string): Promise<string> {
+  const res = await retryFetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+      temperature: 0,
+    }),
+  });
+
+  if (!res.ok) throw new Error(`OpenAI returned ${res.status}`);
+  const data = await res.json();
+  return data.choices[0].message.content;
+}
+
+async function parseWithGemini(prompt: string): Promise<string> {
+  const res = await retryFetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0, responseMimeType: "application/json" },
+      }),
+    }
+  );
+
+  if (!res.ok) throw new Error(`Gemini returned ${res.status}`);
+  const data = await res.json();
+  return data.candidates[0].content.parts[0].text;
+}
+
+// ─── Email Enrichment ─────────────────────────────────────────────────
+
 async function enrichSingleProfile(
-  profile: ApifyProfile,
+  profile: NormalizedProfile,
   parsed: ParsedTitle | undefined
 ): Promise<EnrichedLead> {
-  const fullName =
-    profile.fullName ||
-    profile.reactor?.name ||
-    (profile.firstName || profile.lastName
-      ? `${profile.firstName || ""} ${profile.lastName || ""}`.trim()
-      : "Unknown Name");
-  const headline = profile.headline || profile.reactor?.headline || "";
-  const profileUrl =
-    profile.profileUrl ||
-    profile.profile_url ||
-    profile.reactor?.profileUrl ||
-    profile.reactor?.profile_url ||
-    "";
-
+  const { fullName, headline, linkedinUrl } = profile;
   const company = parsed?.company || "";
   const jobTitle = parsed?.jobTitle || headline || "";
   let email: string | null = null;
 
-  if (fullName && company && process.env.APOLLO_API_KEY) {
+  // Strategy 1: Apollo via LinkedIn URL (no company needed!)
+  if (linkedinUrl && process.env.APOLLO_API_KEY) {
+    try {
+      const res = await fetchWithTimeout(
+        "https://api.apollo.io/v1/people/match",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "X-Api-Key": process.env.APOLLO_API_KEY!,
+          },
+          body: JSON.stringify({ linkedin_url: linkedinUrl }),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        email = data.person?.email || null;
+      }
+    } catch {
+      /* timeout */
+    }
+  }
+
+  // Strategy 2: Apollo via name + company
+  if (!email && fullName && company && process.env.APOLLO_API_KEY) {
     try {
       const nameParts = fullName.split(" ");
       const res = await fetchWithTimeout(
@@ -153,10 +275,11 @@ async function enrichSingleProfile(
         email = data.person?.email || null;
       }
     } catch {
-      /* timeout — continue */
+      /* timeout */
     }
   }
 
+  // Strategy 3: Hunter via name + domain
   if (!email && fullName && company && process.env.HUNTER_API_KEY) {
     try {
       const nameParts = fullName.split(" ");
@@ -169,18 +292,14 @@ async function enrichSingleProfile(
         email = data.data?.email || null;
       }
     } catch {
-      /* timeout — continue */
+      /* timeout */
     }
   }
 
   return {
-    full_name: fullName,
-    linkedin_url:
-      profileUrl ||
-      (profile.publicIdentifier
-        ? `https://linkedin.com/in/${profile.publicIdentifier}`
-        : ""),
-    headline: headline,
+    full_name: fullName || "Unknown",
+    linkedin_url: linkedinUrl,
+    headline,
     job_title: jobTitle,
     company,
     email,
@@ -206,7 +325,7 @@ async function parallelLimit<T>(
   return results;
 }
 
-// ─── Main Pipeline (streaming via callback) ───────────────────────────
+// ─── Main Pipeline ────────────────────────────────────────────────────
 
 export async function runPipeline(
   postUrl: string,
@@ -215,12 +334,14 @@ export async function runPipeline(
 ): Promise<void> {
   const supabase = getSupabaseAdmin();
 
-  // ── Env check ──────────────────────────────────────────────────────
+  // ── Env check (require at least ONE AI key) ────────────────────────
   const missingVars: string[] = [];
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL) missingVars.push("NEXT_PUBLIC_SUPABASE_URL");
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missingVars.push("SUPABASE_SERVICE_ROLE_KEY");
   if (!process.env.APIFY_API_TOKEN) missingVars.push("APIFY_API_TOKEN");
-  if (!process.env.OPENAI_API_KEY) missingVars.push("OPENAI_API_KEY");
+  if (!process.env.OPENAI_API_KEY && !process.env.GEMINI_API_KEY) {
+    missingVars.push("OPENAI_API_KEY or GEMINI_API_KEY (at least one required)");
+  }
 
   if (missingVars.length > 0) {
     onEvent({
@@ -234,20 +355,16 @@ export async function runPipeline(
   onEvent({ type: "step", message: "🔍 Step 1/4 — Scraping LinkedIn post reactions with Apify..." });
 
   const apifyToken = process.env.APIFY_API_TOKEN;
-  let profiles: ApifyProfile[] = [];
 
+  let rawItems: Record<string, any>[] = [];
   try {
-    // Switch to a high-quality, free-credit-friendly actor (No Rental Fee)
     const actorId = "apimaestro~linkedin-post-reactions";
     const runRes = await fetch(
       `https://api.apify.com/v2/acts/${actorId}/runs?token=${apifyToken}&waitForFinish=90`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          post_urls: [postUrl],
-          limit: 100 
-        }),
+        body: JSON.stringify({ post_urls: [postUrl], limit: 100 }),
       }
     );
 
@@ -259,116 +376,82 @@ export async function runPipeline(
     const runData = await runRes.json();
     const datasetId = runData.data.defaultDatasetId;
 
-    // Fetch the results
     const itemsRes = await fetch(
       `https://api.apify.com/v2/datasets/${datasetId}/items?token=${apifyToken}`
     );
-    
-    if (!itemsRes.ok) {
-      throw new Error("Failed to fetch results from Apify dataset");
-    }
 
-    profiles = await itemsRes.json();
-    onEvent({
-      type: "step",
-      message: `✅ Apify found ${profiles.length} reactor${profiles.length !== 1 ? "s" : ""}`,
-      data: { count: profiles.length },
-    });
+    if (!itemsRes.ok) throw new Error("Failed to fetch results from Apify dataset");
+
+    rawItems = await itemsRes.json();
   } catch (error: any) {
-    const msg = error?.message || String(error);
     onEvent({
       type: "error",
-      message: `❌ Apify scraping failed: ${msg}. Check if your APIFY_API_TOKEN is valid and the LinkedIn URL is a post URL.`,
-      data: { errorDetail: msg },
+      message: `❌ Apify scraping failed: ${error?.message}. Check APIFY_API_TOKEN and URL.`,
     });
     return;
   }
+
+  // Normalize the raw data into a clean, flat structure
+  const profiles = normalizeProfiles(rawItems, onEvent);
+
+  onEvent({
+    type: "step",
+    message: `✅ Apify found ${profiles.length} reactor${profiles.length !== 1 ? "s" : ""} (sample: "${profiles[0]?.fullName || "?"}" — "${profiles[0]?.headline?.slice(0, 50) || "?"}...")`,
+  });
 
   if (profiles.length === 0) {
-    onEvent({ type: "done", message: "⚠️ No reactors found on this post. Try a different post URL.", data: { leadsProcessed: 0 } });
+    onEvent({ type: "done", message: "⚠️ No reactors found. Try a different post URL.", data: { leadsProcessed: 0 } });
     return;
   }
 
-  // ── Step 2: OpenAI ───────────────────────────────────────────────
-  onEvent({ type: "step", message: "🤖 Step 2/4 — Parsing job titles with OpenAI..." });
+  // ── Step 2: AI Parsing (OpenAI → Gemini → Regex) ───────────────────
+  onEvent({ type: "step", message: "🤖 Step 2/4 — Parsing job titles (OpenAI → Gemini → Regex)..." });
 
   const parsedTitles: Map<number, ParsedTitle> = new Map();
-  try {
-    const headlines = profiles
-      .map((p, i) => `${i + 1}. "${p.headline || p.reactor?.headline || "N/A"}"`)
-      .join("\n");
+  const headlines = profiles
+    .map((p, i) => `${i + 1}. "${p.headline || "N/A"}"`)
+    .join("\n");
+  const prompt = buildPrompt(headlines);
 
-    const prompt = `Goal: Extract professional details from LinkedIn headlines.
-Input: A list of headlines.
-Task: For each headline, extract the "Job Title" and the "Company Name".
-Output: Return a JSON array where each element has: {"index": <number>, "jobTitle": "<string>", "company": "<string>"}.
+  let aiUsed = "none";
 
-Rules:
-1. If the company is mentioned with "@", "at", or " - ", extract it.
-2. If company is not found, use an empty string.
-3. Return ONLY the valid JSON array. No text before or after bits of text.
-
-Headlines:
-${headlines}`;
-
-    const res = await retryFetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" },
-        temperature: 0,
-      }),
-    });
-
-    if (!res.ok) {
-      throw new Error(`OpenAI API returned ${res.status}`);
+  // Tier 1: OpenAI
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const text = await parseWithOpenAI(prompt);
+      const parsed = extractParsedArray(text);
+      parsed.forEach((item) => parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company }));
+      aiUsed = "OpenAI";
+      onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
+    } catch (err: any) {
+      onEvent({ type: "step", message: `⚠️ OpenAI failed (${err?.message}). Trying Gemini...` });
     }
+  }
 
-    const data = await res.json();
-    const text = data.choices[0].message.content;
-    const jsonStr = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    
-    // OpenAI with json_object might return the array inside a root key or just the array if handled correctly
-    let parsed: { index: number; jobTitle: string; company: string }[] = [];
-    const rawJson = JSON.parse(jsonStr);
-    
-    if (Array.isArray(rawJson)) {
-      parsed = rawJson;
-    } else if (rawJson.data && Array.isArray(rawJson.data)) {
-      parsed = rawJson.data;
-    } else if (rawJson.results && Array.isArray(rawJson.results)) {
-      parsed = rawJson.results;
-    } else {
-      const firstKey = Object.keys(rawJson)[0];
-      if (Array.isArray(rawJson[firstKey])) {
-        parsed = rawJson[firstKey];
-      }
+  // Tier 2: Gemini
+  if (parsedTitles.size === 0 && process.env.GEMINI_API_KEY) {
+    try {
+      const text = await parseWithGemini(prompt);
+      const parsed = extractParsedArray(text);
+      parsed.forEach((item) => parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company }));
+      aiUsed = "Gemini";
+      onEvent({ type: "step", message: `✅ Gemini parsed ${parsedTitles.size} job titles` });
+    } catch (err: any) {
+      onEvent({ type: "step", message: `⚠️ Gemini failed (${err?.message}). Using regex fallback...` });
     }
+  }
 
-    parsed.forEach((item) => {
-      parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company });
-    });
-    onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
-  } catch (error: any) {
-    onEvent({ type: "step", message: `⚠️ OpenAI failed (${error?.message}). Using Lead-Engineer Regex Fallback...` });
-    
-    // Manual fallback for each profile
+  // Tier 3: Regex fallback
+  if (parsedTitles.size === 0) {
     profiles.forEach((p, i) => {
-      const headline = p.headline || p.reactor?.headline || "";
-      if (headline) {
-        parsedTitles.set(i, fallbackRegexParse(headline));
-      }
+      if (p.headline) parsedTitles.set(i, fallbackRegexParse(p.headline));
     });
-    onEvent({ type: "step", message: `✅ Fallback extracted ${parsedTitles.size} titles from headlines` });
+    aiUsed = "Regex";
+    onEvent({ type: "step", message: `✅ Regex extracted ${parsedTitles.size} titles from headlines` });
   }
 
   // ── Step 3: Email Enrichment ──────────────────────────────────────
-  onEvent({ type: "step", message: `📧 Step 3/4 — Enriching ${profiles.length} leads with emails (Apollo + Hunter)...` });
+  onEvent({ type: "step", message: `📧 Step 3/4 — Enriching ${profiles.length} leads with emails (Apollo via LinkedIn URL + Hunter)...` });
 
   const enrichmentTasks = profiles.map(
     (profile, i) => () => enrichSingleProfile(profile, parsedTitles.get(i))
@@ -376,9 +459,11 @@ ${headlines}`;
   const enrichedLeads = await parallelLimit(enrichmentTasks, 5);
 
   const emailCount = enrichedLeads.filter((l) => l.email).length;
+  const urlCount = enrichedLeads.filter((l) => l.linkedin_url).length;
+  const companyCount = enrichedLeads.filter((l) => l.company).length;
   onEvent({
     type: "step",
-    message: `✅ Enriched ${enrichedLeads.length} leads — ${emailCount} email${emailCount !== 1 ? "s" : ""} found`,
+    message: `✅ Enriched ${enrichedLeads.length} leads — ${emailCount} email${emailCount !== 1 ? "s" : ""}, ${urlCount} LinkedIn URLs, ${companyCount} companies (AI: ${aiUsed})`,
   });
 
   // ── Step 4: Save to Supabase ──────────────────────────────────────
@@ -397,7 +482,7 @@ ${headlines}`;
   if (insertError) {
     onEvent({
       type: "error",
-      message: `❌ Database save failed: ${insertError.message}. Check your Supabase table schema and service_role key.`,
+      message: `❌ Database save failed: ${insertError.message}. Check your Supabase table schema.`,
       data: { errorDetail: insertError.message, code: insertError.code },
     });
     return;
@@ -405,7 +490,7 @@ ${headlines}`;
 
   onEvent({
     type: "done",
-    message: `🎉 Done! ${enrichedLeads.length} leads extracted and saved (${emailCount} with emails).`,
+    message: `🎉 Done! ${enrichedLeads.length} leads saved (${emailCount} emails, ${urlCount} URLs, ${companyCount} companies). AI used: ${aiUsed}`,
     data: { leadsProcessed: enrichedLeads.length, emailsFound: emailCount },
   });
 }
