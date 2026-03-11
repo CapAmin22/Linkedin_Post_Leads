@@ -198,24 +198,42 @@ async function parseWithOpenAI(prompt: string): Promise<string> {
 }
 
 async function parseWithGemini(prompt: string): Promise<string> {
-  const res = await retryFetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, responseMimeType: "application/json" },
-      }),
-    }
-  );
+  // Try v1 first (more stable), fallback to v1beta
+  const versions = ["v1", "v1beta"];
+  let lastError: any;
 
-  if (!res.ok) throw new Error(`Gemini returned ${res.status}`);
-  const data = await res.json();
-  return data.candidates[0].content.parts[0].text;
+  for (const version of versions) {
+    try {
+      const res = await retryFetch(
+        `https://generativelanguage.googleapis.com/${version}/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0, responseMimeType: "application/json" },
+          }),
+        }
+      );
+
+      if (res.ok) {
+        const data = await res.json();
+        return data.candidates[0].content.parts[0].text;
+      }
+      
+      const errData = await res.json().catch(() => ({}));
+      lastError = new Error(`Gemini ${version} returned ${res.status}: ${errData.error?.message || "Unknown error"}`);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
 }
 
 // ─── Email Enrichment ─────────────────────────────────────────────────
+
+// Track Apollo status to avoid repeated 403s on free plans
+let apolloDisabled = false;
 
 async function enrichSingleProfile(
   profile: NormalizedProfile,
@@ -227,7 +245,7 @@ async function enrichSingleProfile(
   let email: string | null = null;
 
   // Strategy 1: Apollo via LinkedIn URL (no company needed!)
-  if (linkedinUrl && process.env.APOLLO_API_KEY) {
+  if (linkedinUrl && process.env.APOLLO_API_KEY && !apolloDisabled) {
     try {
       const res = await fetchWithTimeout(
         "https://api.apollo.io/v1/people/match",
@@ -244,6 +262,8 @@ async function enrichSingleProfile(
       if (res.ok) {
         const data = await res.json();
         email = data.person?.email || null;
+      } else if (res.status === 403) {
+        apolloDisabled = true; // Stop trying Apollo Match on free keys
       }
     } catch {
       /* timeout */
@@ -279,17 +299,34 @@ async function enrichSingleProfile(
     }
   }
 
-  // Strategy 3: Hunter via name + domain
+  // Strategy 3: Hunter via name + domain (with Domain Search fallback)
   if (!email && fullName && company && process.env.HUNTER_API_KEY) {
     try {
       const nameParts = fullName.split(" ");
-      const domain = company.toLowerCase().replace(/[^a-z0-9]/g, "") + ".com";
-      const res = await fetchWithTimeout(
-        `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(nameParts[0] || "")}&last_name=${encodeURIComponent(nameParts.slice(1).join(" ") || "")}&api_key=${process.env.HUNTER_API_KEY}`
-      );
-      if (res.ok) {
-        const data = await res.json();
-        email = data.data?.email || null;
+      let domain = "";
+
+      // Try to find domain first if it looks like a name only
+      if (!company.includes(".") && !company.includes(" ")) {
+        domain = company.toLowerCase() + ".com";
+      } else if (company) {
+        // Hunter Domain Search
+        const dsRes = await fetchWithTimeout(
+          `https://api.hunter.io/v2/domain-search?company=${encodeURIComponent(company)}&api_key=${process.env.HUNTER_API_KEY}`
+        );
+        if (dsRes.ok) {
+          const dsData = await dsRes.json();
+          domain = dsData.data?.domain || "";
+        }
+      }
+
+      if (domain) {
+        const res = await fetchWithTimeout(
+          `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(nameParts[0] || "")}&last_name=${encodeURIComponent(nameParts.slice(1).join(" ") || "")}&api_key=${process.env.HUNTER_API_KEY}`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          email = data.data?.email || null;
+        }
       }
     } catch {
       /* timeout */
@@ -333,6 +370,7 @@ export async function runPipeline(
   onEvent: (event: PipelineEvent) => void
 ): Promise<void> {
   const supabase = getSupabaseAdmin();
+  apolloDisabled = false; // Reset for each new run
 
   // ── Env check (require at least ONE AI key) ────────────────────────
   const missingVars: string[] = [];
