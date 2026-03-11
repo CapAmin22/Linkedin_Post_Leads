@@ -18,8 +18,8 @@ export async function GET() {
     status.supabase.serviceKeySet = serviceKey !== "YOUR_SUPABASE_SERVICE_ROLE_KEY_HERE" && serviceKey.length > 20;
     
     // 2. Check Trigger Key
-    const triggerKey = process.env.TRIGGER_API_KEY || "";
-    status.trigger.type = triggerKey.startsWith("tr_sk_") ? "Secret (Correct)" : triggerKey.startsWith("tr_dev_") ? "Public (Incorrect)" : "Invalid";
+    const triggerKey = process.env.TRIGGER_SECRET_KEY || "";
+    status.trigger.type = triggerKey.startsWith("tr_dev_") ? "Dev Secret (OK for local)" : triggerKey.startsWith("tr_prod_") ? "Prod Secret (Correct)" : "Invalid";
     
     // 3. Test Supabase Connection
     const supabase = await createClient();

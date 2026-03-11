@@ -12,7 +12,7 @@ export async function POST(request: Request) {
     // Key Validation Diagnostics
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    const triggerKey = process.env.TRIGGER_API_KEY;
+    const triggerKey = process.env.TRIGGER_SECRET_KEY;
 
     if (!supabaseUrl || !supabaseKey || !triggerKey) {
       console.error("Missing critical environment variables:", { supabaseUrl: !!supabaseUrl, supabaseKey: !!supabaseKey, triggerKey: !!triggerKey });
@@ -27,8 +27,8 @@ export async function POST(request: Request) {
       console.warn("WARNING: NEXT_PUBLIC_SUPABASE_ANON_KEY does not look like a standard Supabase JWT key.");
     }
 
-    if (triggerKey && triggerKey.startsWith("tr_dev_")) {
-      console.warn("WARNING: TRIGGER_API_KEY looks like a Public/Dev key. Trigger.dev v3 requires a Secret Key (starting with 'tr_sk_') for server-side triggers.");
+    if (triggerKey && !triggerKey.startsWith("tr_dev_") && !triggerKey.startsWith("tr_prod_")) {
+      console.warn("WARNING: TRIGGER_SECRET_KEY does not look like a valid Trigger.dev key. Expected prefix: tr_dev_ (local) or tr_prod_ (production).");
     }
 
     const {
@@ -67,8 +67,8 @@ export async function POST(request: Request) {
 
     // Dispatch the Trigger.dev task
     try {
-      if (!triggerKey || !triggerKey.startsWith("tr_sk_")) {
-        throw new Error("Invalid TRIGGER_API_KEY. For @trigger.dev/sdk/v3, you must use a Secret Key (starts with 'tr_sk_').");
+      if (!triggerKey || (!triggerKey.startsWith("tr_dev_") && !triggerKey.startsWith("tr_prod_"))) {
+        throw new Error("Invalid TRIGGER_SECRET_KEY. Use a Secret Key starting with 'tr_dev_' (local) or 'tr_prod_' (production).");
       }
 
       console.log("Triggering task 'scrape-leads'...");
