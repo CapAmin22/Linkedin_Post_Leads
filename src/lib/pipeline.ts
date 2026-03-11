@@ -100,9 +100,12 @@ async function runApifyActor(
     if (!runRes.ok) return [];
 
     const runData = await runRes.json();
-    if (runData.data?.status !== "SUCCEEDED" || runData.error) return [];
+    if (runData.error) return [];
 
-    const datasetId = runData.data.defaultDatasetId;
+    // Always fetch the dataset associated with the defaultDatasetId, even if it hasn't succeeded in the strict synchronously waited response window.
+    const datasetId = runData.data?.defaultDatasetId;
+    if (!datasetId) return [];
+
     const itemsRes = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}`);
     if (!itemsRes.ok) return [];
 
@@ -537,12 +540,17 @@ export async function runPipeline(
       if (deepItems.length > 0) {
           deepDiveUsed = true;
           profiles.forEach((p, i) => {
-              const matched = deepItems.find(d => 
-                  d.linkedinUrl === p.linkedinUrl || 
-                  d.url === p.linkedinUrl || 
-                  d.profileUrl === p.linkedinUrl || 
-                  (d.publicIdentifier && p.linkedinUrl.includes(d.publicIdentifier))
-              );
+              const pCleanUrl = p.linkedinUrl.replace(/\/$/, ""); // Trim trailing slash
+              const matched = deepItems.find(d => {
+                 if (!d) return false;
+                 const dUrl1 = (d.linkedinUrl || "").replace(/\/$/, "");
+                 const dUrl2 = (d.url || "").replace(/\/$/, "");
+                 const dUrl3 = (d.profileUrl || "").replace(/\/$/, "");
+                 return (dUrl1 && pCleanUrl.includes(dUrl1)) || 
+                        (dUrl2 && pCleanUrl.includes(dUrl2)) || 
+                        (dUrl3 && pCleanUrl.includes(dUrl3)) || 
+                        (d.publicIdentifier && pCleanUrl.includes(d.publicIdentifier));
+              });
               // Bypass error objects returned from actors locking out free tier via API
               if (matched && !matched.error) {
                   const company = matched.company || matched.companyName || matched.experiences?.[0]?.company || matched.experience?.[0]?.companyName || "";
