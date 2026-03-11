@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
   Table,
@@ -40,7 +40,7 @@ interface LeadsTableProps {
 export default function LeadsTable({ activeJobId }: LeadsTableProps) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const fetchLeads = useCallback(async () => {
     const { data, error } = await supabase
@@ -64,7 +64,7 @@ export default function LeadsTable({ activeJobId }: LeadsTableProps) {
   useEffect(() => {
     if (!activeJobId) return;
 
-    const interval = setInterval(fetchLeads, 5000);
+    const interval = setInterval(fetchLeads, 3000);
     return () => clearInterval(interval);
   }, [activeJobId, fetchLeads]);
 
