@@ -1,4 +1,3 @@
-import { ApifyClient } from "apify-client";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@supabase/supabase-js";
 
@@ -171,16 +170,39 @@ export async function runPipeline(
   // ── Step 1: Apify ──────────────────────────────────────────────────
   onEvent({ type: "step", message: "🔍 Step 1/4 — Scraping LinkedIn post reactions with Apify..." });
 
-  const apify = new ApifyClient({ token: process.env.APIFY_API_TOKEN });
+  const apifyToken = process.env.APIFY_API_TOKEN;
   let profiles: ApifyProfile[] = [];
 
   try {
-    const run = await apify
-      .actor("curious_coder/linkedin-post-reactions-scraper")
-      .call({ postUrl, maxItems: 100 }, { waitSecs: 90 });
+    // Call Apify API directly via fetch to avoid library dependency issues (proxy-agent)
+    const actorId = "curious_coder~linkedin-post-reactions-scraper";
+    const runRes = await fetch(
+      `https://api.apify.com/v2/acts/${actorId}/runs?token=${apifyToken}&waitForFinish=90`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ postUrl, maxItems: 100 }),
+      }
+    );
 
-    const { items } = await apify.dataset(run.defaultDatasetId).listItems();
-    profiles = items as unknown as ApifyProfile[];
+    if (!runRes.ok) {
+      const errorData = await runRes.json();
+      throw new Error(errorData.error?.message || `Apify API returned ${runRes.status}`);
+    }
+
+    const runData = await runRes.json();
+    const datasetId = runData.data.defaultDatasetId;
+
+    // Fetch the results
+    const itemsRes = await fetch(
+      `https://api.apify.com/v2/datasets/${datasetId}/items?token=${apifyToken}`
+    );
+    
+    if (!itemsRes.ok) {
+      throw new Error("Failed to fetch results from Apify dataset");
+    }
+
+    profiles = await itemsRes.json();
     onEvent({
       type: "step",
       message: `✅ Apify found ${profiles.length} reactor${profiles.length !== 1 ? "s" : ""}`,
