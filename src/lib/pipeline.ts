@@ -198,33 +198,36 @@ async function parseWithOpenAI(prompt: string): Promise<string> {
 }
 
 async function parseWithGemini(prompt: string): Promise<string> {
-  // Try v1 first (more stable), fallback to v1beta
+  // Try multiple model identifiers and versions to avoid 404s
+  const models = ["gemini-2.0-flash", "gemini-flash-latest"];
   const versions = ["v1", "v1beta"];
   let lastError: any;
 
-  for (const version of versions) {
-    try {
-      const res = await retryFetch(
-        `https://generativelanguage.googleapis.com/${version}/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0, responseMimeType: "application/json" },
-          }),
-        }
-      );
+  for (const model of models) {
+    for (const version of versions) {
+      try {
+        const res = await retryFetch(
+          `https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { temperature: 0, responseMimeType: "application/json" },
+            }),
+          }
+        );
 
-      if (res.ok) {
-        const data = await res.json();
-        return data.candidates[0].content.parts[0].text;
+        if (res.ok) {
+          const data = await res.json();
+          return data.candidates[0].content.parts[0].text;
+        }
+        
+        const errData = await res.json().catch(() => ({}));
+        lastError = new Error(`Gemini ${model} (${version}) returned ${res.status}: ${errData.error?.message || "Unknown error"}`);
+      } catch (err) {
+        lastError = err;
       }
-      
-      const errData = await res.json().catch(() => ({}));
-      lastError = new Error(`Gemini ${version} returned ${res.status}: ${errData.error?.message || "Unknown error"}`);
-    } catch (err) {
-      lastError = err;
     }
   }
   throw lastError;
@@ -304,14 +307,22 @@ async function enrichSingleProfile(
     try {
       const nameParts = fullName.split(" ");
       let domain = "";
+      // Clean messy company names (Pro Level)
+      // Remove common marketing noise like "Helping...", "🚀", "Scaling..."
+      let cleanCompany = company
+        .split(/[|,-]/)[0] // Take first part if regex failed to isolate
+        .replace(/helping.*/i, "")
+        .replace(/scaling.*/i, "")
+        .replace(/building.*/i, "")
+        .replace(/[^\w\s]/g, "") // Remove emojis/special chars
+        .trim();
 
-      // Try to find domain first if it looks like a name only
-      if (!company.includes(".") && !company.includes(" ")) {
-        domain = company.toLowerCase() + ".com";
-      } else if (company) {
+      if (!cleanCompany && company) cleanCompany = company.split(" ")[0]; // Use first word as last resort
+
+      if (cleanCompany) {
         // Hunter Domain Search
         const dsRes = await fetchWithTimeout(
-          `https://api.hunter.io/v2/domain-search?company=${encodeURIComponent(company)}&api_key=${process.env.HUNTER_API_KEY}`
+          `https://api.hunter.io/v2/domain-search?company=${encodeURIComponent(cleanCompany)}&api_key=${process.env.HUNTER_API_KEY}`
         );
         if (dsRes.ok) {
           const dsData = await dsRes.json();
@@ -462,7 +473,11 @@ export async function runPipeline(
       aiUsed = "OpenAI";
       onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
     } catch (err: any) {
-      onEvent({ type: "step", message: `⚠️ OpenAI failed (${err?.message}). Trying Gemini...` });
+      const isQuota = err?.message?.includes("429") || err?.message?.includes("quota");
+      onEvent({ 
+        type: "step", 
+        message: `⚠️ OpenAI failed (${isQuota ? "429: Likely Billing/Quota issue" : err?.message}). Trying Gemini...` 
+      });
     }
   }
 
@@ -475,7 +490,11 @@ export async function runPipeline(
       aiUsed = "Gemini";
       onEvent({ type: "step", message: `✅ Gemini parsed ${parsedTitles.size} job titles` });
     } catch (err: any) {
-      onEvent({ type: "step", message: `⚠️ Gemini failed (${err?.message}). Using regex fallback...` });
+      const isQuota = err?.message?.includes("429") || err?.message?.includes("quota");
+      onEvent({ 
+        type: "step", 
+        message: `⚠️ Gemini failed (${isQuota ? "429: Quota exceeded" : err?.message}). Using regex fallback...` 
+      });
     }
   }
 
