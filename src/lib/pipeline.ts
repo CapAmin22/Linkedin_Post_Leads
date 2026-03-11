@@ -54,14 +54,15 @@ async function fetchWithTimeout(
 async function retryFetch(
   url: string,
   options: RequestInit,
-  maxRetries = 2,
-  delay = 2000
+  maxRetries = 1, // Reduced for speed
+  delay = 1000,
+  shouldRetry429 = false // Don't retry 429 by default for speed
 ): Promise<Response> {
   let lastError: any;
   for (let i = 0; i <= maxRetries; i++) {
     try {
-      const res = await fetchWithTimeout(url, options, 15000);
-      if (res.status === 429 && i < maxRetries) {
+      const res = await fetchWithTimeout(url, options, 8000); // 8s timeout
+      if (res.status === 429 && shouldRetry429 && i < maxRetries) {
         await new Promise((r) => setTimeout(r, delay * Math.pow(2, i)));
         continue;
       }
@@ -69,7 +70,7 @@ async function retryFetch(
     } catch (err) {
       lastError = err;
       if (i === maxRetries) throw err;
-      await new Promise((r) => setTimeout(r, delay * Math.pow(2, i)));
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
   throw lastError;
@@ -198,39 +199,34 @@ async function parseWithOpenAI(prompt: string): Promise<string> {
 }
 
 async function parseWithGemini(prompt: string): Promise<string> {
-  // Try multiple model identifiers and versions to avoid 404s
-  const models = ["gemini-2.0-flash", "gemini-flash-latest"];
-  const versions = ["v1", "v1beta"];
-  let lastError: any;
+  // Use v1beta and gemini-2.0-flash as primary for speed/availability
+  const model = "gemini-2.0-flash";
+  const version = "v1beta"; 
+  
+  try {
+    const res = await retryFetch(
+      `https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0, responseMimeType: "application/json" },
+        }),
+      },
+      0 // 0 retries, fail fast
+    );
 
-  for (const model of models) {
-    for (const version of versions) {
-      try {
-        const res = await retryFetch(
-          `https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { temperature: 0, responseMimeType: "application/json" },
-            }),
-          }
-        );
-
-        if (res.ok) {
-          const data = await res.json();
-          return data.candidates[0].content.parts[0].text;
-        }
-        
-        const errData = await res.json().catch(() => ({}));
-        lastError = new Error(`Gemini ${model} (${version}) returned ${res.status}: ${errData.error?.message || "Unknown error"}`);
-      } catch (err) {
-        lastError = err;
-      }
+    if (res.ok) {
+      const data = await res.json();
+      return data.candidates[0].content.parts[0].text;
     }
+    
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(`Gemini returned ${res.status}: ${errData.error?.message || "Quota/Error"}`);
+  } catch (err: any) {
+    throw err;
   }
-  throw lastError;
 }
 
 // ─── Email Enrichment ─────────────────────────────────────────────────
@@ -513,7 +509,7 @@ export async function runPipeline(
   const enrichmentTasks = profiles.map(
     (profile, i) => () => enrichSingleProfile(profile, parsedTitles.get(i))
   );
-  const enrichedLeads = await parallelLimit(enrichmentTasks, 5);
+  const enrichedLeads = await parallelLimit(enrichmentTasks, 10); // Increased concurrency
 
   const emailCount = enrichedLeads.filter((l) => l.email).length;
   const urlCount = enrichedLeads.filter((l) => l.linkedin_url).length;
