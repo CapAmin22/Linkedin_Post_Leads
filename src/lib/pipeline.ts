@@ -1,4 +1,3 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@supabase/supabase-js";
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -177,7 +176,7 @@ export async function runPipeline(
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL) missingVars.push("NEXT_PUBLIC_SUPABASE_URL");
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missingVars.push("SUPABASE_SERVICE_ROLE_KEY");
   if (!process.env.APIFY_API_TOKEN) missingVars.push("APIFY_API_TOKEN");
-  if (!process.env.GEMINI_API_KEY) missingVars.push("GEMINI_API_KEY");
+  if (!process.env.OPENAI_API_KEY) missingVars.push("OPENAI_API_KEY");
 
   if (missingVars.length > 0) {
     onEvent({
@@ -246,20 +245,16 @@ export async function runPipeline(
     return;
   }
 
-  // ── Step 2: Gemini ────────────────────────────────────────────────
-  onEvent({ type: "step", message: "🤖 Step 2/4 — Parsing job titles with Gemini AI..." });
+  // ── Step 2: OpenAI ───────────────────────────────────────────────
+  onEvent({ type: "step", message: "🤖 Step 2/4 — Parsing job titles with OpenAI..." });
 
   const parsedTitles: Map<number, ParsedTitle> = new Map();
   try {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
     const headlines = profiles
       .map((p, i) => `${i + 1}. "${p.headline || p.reactor?.headline || "N/A"}"`)
       .join("\n");
 
-    const result = await model.generateContent(
-      `Goal: Extract professional details from LinkedIn headlines.
+    const prompt = `Goal: Extract professional details from LinkedIn headlines.
 Input: A list of headlines.
 Task: For each headline, extract the "Job Title" and the "Company Name".
 Output: Return a JSON array where each element has: {"index": <number>, "jobTitle": "<string>", "company": "<string>"}.
@@ -267,22 +262,55 @@ Output: Return a JSON array where each element has: {"index": <number>, "jobTitl
 Rules:
 1. If the company is mentioned with "@", "at", or " - ", extract it.
 2. If company is not found, use an empty string.
-3. Return ONLY the valid JSON array. No text before or after.
+3. Return ONLY the valid JSON array. No text before or after bits of text.
 
 Headlines:
-${headlines}`
-    );
+${headlines}`;
 
-    const text = result.response.text();
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        temperature: 0,
+      }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`OpenAI API returned ${res.status}`);
+    }
+
+    const data = await res.json();
+    const text = data.choices[0].message.content;
     const jsonStr = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const parsed: { index: number; jobTitle: string; company: string }[] = JSON.parse(jsonStr);
+    
+    // OpenAI with json_object might return the array inside a root key or just the array if handled correctly
+    let parsed: { index: number; jobTitle: string; company: string }[] = [];
+    const rawJson = JSON.parse(jsonStr);
+    
+    if (Array.isArray(rawJson)) {
+      parsed = rawJson;
+    } else if (rawJson.results && Array.isArray(rawJson.results)) {
+      parsed = rawJson.results;
+    } else {
+      // Sometimes it wraps it in an object like { "data": [...] }
+      const firstKey = Object.keys(rawJson)[0];
+      if (Array.isArray(rawJson[firstKey])) {
+        parsed = rawJson[firstKey];
+      }
+    }
 
     parsed.forEach((item) => {
       parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company });
     });
-    onEvent({ type: "step", message: `✅ Gemini parsed ${parsedTitles.size} job titles` });
+    onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
   } catch (error: any) {
-    onEvent({ type: "step", message: `⚠️ Gemini parsing failed (${error?.message}), continuing without parsed titles...` });
+    onEvent({ type: "step", message: `⚠️ OpenAI parsing failed (${error?.message}), continuing without parsed titles...` });
   }
 
   // ── Step 3: Email Enrichment ──────────────────────────────────────

@@ -25,11 +25,11 @@ export async function GET() {
     detail: apifyToken ? `${apifyToken.slice(0, 15)}...` : "MISSING",
   };
 
-  // 3. Check Gemini
-  const geminiKey = process.env.GEMINI_API_KEY;
-  results.gemini_key = {
-    status: geminiKey && geminiKey.startsWith("AIza") ? "✅ Set" : "❌ Missing or Invalid",
-    detail: geminiKey ? `${geminiKey.slice(0, 15)}...` : "MISSING",
+  // 3. Check OpenAI
+  const openaiKey = process.env.OPENAI_API_KEY;
+  results.openai_key = {
+    status: openaiKey && openaiKey.startsWith("sk-") ? "✅ Set" : "❌ Missing or Invalid",
+    detail: openaiKey ? `${openaiKey.slice(0, 15)}...` : "MISSING",
   };
 
   // 4. Check Apollo
