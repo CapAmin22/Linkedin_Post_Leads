@@ -8,12 +8,14 @@ interface ApifyProfile {
   lastName?: string;
   headline?: string;
   profileUrl?: string;
+  profile_url?: string; // Some actors use underscore
   publicIdentifier?: string;
   // Support for apimaestro output format
   reactor?: {
     name?: string;
     headline?: string;
     profileUrl?: string;
+    profile_url?: string;
     photoUrl?: string;
   };
 }
@@ -69,9 +71,16 @@ async function enrichSingleProfile(
   const fullName =
     profile.fullName ||
     profile.reactor?.name ||
-    `${profile.firstName || ""} ${profile.lastName || ""}`.trim();
+    (profile.firstName || profile.lastName
+      ? `${profile.firstName || ""} ${profile.lastName || ""}`.trim()
+      : "Unknown Name");
   const headline = profile.headline || profile.reactor?.headline || "";
-  const profileUrl = profile.profileUrl || profile.reactor?.profileUrl || "";
+  const profileUrl =
+    profile.profileUrl ||
+    profile.profile_url ||
+    profile.reactor?.profileUrl ||
+    profile.reactor?.profile_url ||
+    "";
 
   const company = parsed?.company || "";
   const jobTitle = parsed?.jobTitle || headline || "";
@@ -250,10 +259,15 @@ export async function runPipeline(
       .join("\n");
 
     const result = await model.generateContent(
-      `Extract the job title and company name from each LinkedIn headline below.
-Return a JSON array where each element has: {"index": <number>, "jobTitle": "<string>", "company": "<string>"}.
-If you cannot determine a field, use an empty string.
-Return ONLY the JSON array, no markdown, no explanation.
+      `Goal: Extract professional details from LinkedIn headlines.
+Input: A list of headlines.
+Task: For each headline, extract the "Job Title" and the "Company Name".
+Output: Return a JSON array where each element has: {"index": <number>, "jobTitle": "<string>", "company": "<string>"}.
+
+Rules:
+1. If the company is mentioned with "@", "at", or " - ", extract it.
+2. If company is not found, use an empty string.
+3. Return ONLY the valid JSON array. No text before or after.
 
 Headlines:
 ${headlines}`
