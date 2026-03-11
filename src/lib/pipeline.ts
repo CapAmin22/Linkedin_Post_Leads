@@ -174,14 +174,17 @@ export async function runPipeline(
   let profiles: ApifyProfile[] = [];
 
   try {
-    // Call Apify API directly via fetch to avoid library dependency issues (proxy-agent)
-    const actorId = "curious_coder~linkedin-post-reactions-scraper";
+    // Switch to official Apify actor which is usually free/cheaper and more stable
+    const actorId = "apify~linkedin-post-reactions-scraper";
     const runRes = await fetch(
       `https://api.apify.com/v2/acts/${actorId}/runs?token=${apifyToken}&waitForFinish=90`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ postUrl, maxItems: 100 }),
+        body: JSON.stringify({ 
+          postUrl,
+          maxResults: 100, // Official actor uses maxResults instead of maxItems
+        }),
       }
     );
 
