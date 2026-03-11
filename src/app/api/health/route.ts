@@ -22,28 +22,35 @@ export async function GET() {
     status: apifyToken && apifyToken.length > 10 ? "✅ Set" : "❌ Missing",
   };
 
-  // 3. OpenAI
+  // 3. Groq
+  const groqKey = process.env.GROQ_API_KEY;
+  results.groq_key = {
+    status: groqKey && groqKey.startsWith("gsk_") ? "✅ Set" : "⚠️ Missing",
+  };
+
+  // 4. OpenAI
   const openaiKey = process.env.OPENAI_API_KEY;
   results.openai_key = {
     status: openaiKey && openaiKey.startsWith("sk-") ? "✅ Set" : "⚠️ Missing",
   };
 
-  // 4. Gemini
+  // 5. Gemini
   const geminiKey = process.env.GEMINI_API_KEY;
   results.gemini_key = {
     status: geminiKey && geminiKey.startsWith("AIza") ? "✅ Set" : "⚠️ Missing",
   };
 
   // AI status
+  const activeKeys = [
+    groqKey ? "Groq" : null,
+    geminiKey ? "Gemini" : null,
+    openaiKey ? "OpenAI" : null,
+  ].filter(Boolean);
+
   results.ai_strategy = {
-    status:
-      openaiKey && geminiKey
-        ? "✅ Dual AI (OpenAI + Gemini)"
-        : openaiKey
-          ? "✅ OpenAI only"
-          : geminiKey
-            ? "✅ Gemini only"
-            : "❌ No AI key set!",
+    status: activeKeys.length > 0 
+      ? `✅ Active Chain: ${activeKeys.join(" → ")}`
+      : "❌ No AI key set!",
   };
 
   // 5. Apollo

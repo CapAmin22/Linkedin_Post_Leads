@@ -147,7 +147,7 @@ function fallbackRegexParse(headline: string): ParsedTitle {
   return { jobTitle: headline, company: "" };
 }
 
-// ─── AI Parsing: OpenAI → Gemini → Regex ──────────────────────────────
+// ─── AI Parsing: Groq → Gemini → OpenAI → Regex ──────────────────
 
 function buildPrompt(headlines: string): string {
   return `Goal: Extract professional details from LinkedIn headlines.
@@ -176,6 +176,35 @@ function extractParsedArray(text: string): { index: number; jobTitle: string; co
   }
 
   return [];
+}
+
+async function parseWithGroq(prompt: string): Promise<string> {
+  const model = "llama-3.3-70b-versatile";
+  const res = await retryFetch(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        temperature: 0,
+      }),
+    },
+    0 // 0 retries, fail fast
+  );
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(`Groq returned ${res.status}: ${errData.error?.message || "Quota/Error"}`);
+  }
+  
+  const data = await res.json();
+  return data.choices[0].message.content;
 }
 
 async function parseWithOpenAI(prompt: string): Promise<string> {
@@ -449,8 +478,8 @@ export async function runPipeline(
     return;
   }
 
-  // ── Step 2: AI Parsing (OpenAI → Gemini → Regex) ───────────────────
-  onEvent({ type: "step", message: "🤖 Step 2/4 — Parsing job titles (OpenAI → Gemini → Regex)..." });
+  // ── Step 2: AI Parsing (Groq → Gemini → OpenAI → Regex) ───────────────────
+  onEvent({ type: "step", message: "🤖 Step 2/4 — Parsing job titles (Groq → Gemini → OpenAI → Regex)..." });
 
   const parsedTitles: Map<number, ParsedTitle> = new Map();
   const headlines = profiles
@@ -460,19 +489,18 @@ export async function runPipeline(
 
   let aiUsed = "none";
 
-  // Tier 1: OpenAI
-  if (process.env.OPENAI_API_KEY) {
+  // Tier 1: Groq
+  if (process.env.GROQ_API_KEY) {
     try {
-      const text = await parseWithOpenAI(prompt);
+      const text = await parseWithGroq(prompt);
       const parsed = extractParsedArray(text);
       parsed.forEach((item) => parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company }));
-      aiUsed = "OpenAI";
-      onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
+      aiUsed = "Groq";
+      onEvent({ type: "step", message: `✅ Groq parsed ${parsedTitles.size} job titles` });
     } catch (err: any) {
-      const isQuota = err?.message?.includes("429") || err?.message?.includes("quota");
       onEvent({ 
         type: "step", 
-        message: `⚠️ OpenAI failed (${isQuota ? "429: Likely Billing/Quota issue" : err?.message}). Trying Gemini...` 
+        message: `⚠️ Groq failed (${err?.message}). Trying Gemini...` 
       });
     }
   }
@@ -486,15 +514,32 @@ export async function runPipeline(
       aiUsed = "Gemini";
       onEvent({ type: "step", message: `✅ Gemini parsed ${parsedTitles.size} job titles` });
     } catch (err: any) {
-      const isQuota = err?.message?.includes("429") || err?.message?.includes("quota");
+      const isQuota = err?.message?.includes("429") || err?.message?.includes("quota") || err?.message?.includes("403");
       onEvent({ 
         type: "step", 
-        message: `⚠️ Gemini failed (${isQuota ? "429: Quota exceeded" : err?.message}). Using regex fallback...` 
+        message: `⚠️ Gemini failed (${isQuota ? "Quota exceeded" : err?.message}). Trying OpenAI...` 
       });
     }
   }
 
-  // Tier 3: Regex fallback
+  // Tier 3: OpenAI
+  if (parsedTitles.size === 0 && process.env.OPENAI_API_KEY) {
+    try {
+      const text = await parseWithOpenAI(prompt);
+      const parsed = extractParsedArray(text);
+      parsed.forEach((item) => parsedTitles.set(item.index - 1, { jobTitle: item.jobTitle, company: item.company }));
+      aiUsed = "OpenAI";
+      onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
+    } catch (err: any) {
+      const isQuota = err?.message?.includes("429") || err?.message?.includes("quota");
+      onEvent({ 
+        type: "step", 
+        message: `⚠️ OpenAI failed (${isQuota ? "429: Likely Billing/Quota issue" : err?.message}). Using regex fallback...` 
+      });
+    }
+  }
+
+  // Tier 4: Regex fallback
   if (parsedTitles.size === 0) {
     profiles.forEach((p, i) => {
       if (p.headline) parsedTitles.set(i, fallbackRegexParse(p.headline));

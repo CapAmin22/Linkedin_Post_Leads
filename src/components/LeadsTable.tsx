@@ -177,6 +177,7 @@ export default function LeadsTable({ refreshKey }: LeadsTableProps) {
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="font-semibold">Name</TableHead>
+                  <TableHead className="font-semibold">LinkedIn</TableHead>
                   <TableHead className="font-semibold">Job Title</TableHead>
                   <TableHead className="font-semibold">Company</TableHead>
                   <TableHead className="font-semibold">Email</TableHead>
@@ -187,23 +188,28 @@ export default function LeadsTable({ refreshKey }: LeadsTableProps) {
                 {leads.map((lead) => (
                   <TableRow key={lead.id} className="transition-colors">
                     <TableCell className="font-medium">
+                      {lead.full_name || "—"}
+                    </TableCell>
+                    <TableCell>
                       {lead.linkedin_url ? (
                         <a
                           href={lead.linkedin_url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-primary hover:underline underline-offset-4"
+                          className="text-primary hover:text-primary/80 transition-colors flex items-center gap-1.5"
+                          title={lead.linkedin_url}
                         >
-                          {lead.full_name || "—"}
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/><rect width="4" height="12" x="2" y="9"/><circle cx="4" cy="4" r="2"/></svg>
+                          <span className="text-xs font-mono">{new URL(lead.linkedin_url).pathname.replace('/in/', '')}</span>
                         </a>
                       ) : (
-                        lead.full_name || "—"
+                        <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {lead.job_title || lead.headline || "—"}
                     </TableCell>
-                    <TableCell className="text-muted-foreground">
+                    <TableCell className="font-medium text-foreground">
                       {lead.company || "—"}
                     </TableCell>
                     <TableCell>
