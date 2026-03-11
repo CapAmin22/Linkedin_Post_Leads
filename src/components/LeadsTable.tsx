@@ -63,13 +63,14 @@ export default function LeadsTable({ refreshKey }: LeadsTableProps) {
   const exportToCsv = () => {
     if (leads.length === 0) return;
     
-    const headers = ["Name", "Job Title", "Company", "Email", "LinkedIn URL", "Status"];
+    const headers = ["Name", "LinkedIn URL", "Headline", "AI Job Title", "AI Company", "Email", "Status"];
     const csvRows = leads.map(lead => [
       `"${(lead.full_name || "").replace(/"/g, '""')}"`,
-      `"${(lead.job_title || lead.headline || "").replace(/"/g, '""')}"`,
+      `"${(lead.linkedin_url || "").replace(/"/g, '""')}"`,
+      `"${(lead.headline || "").replace(/"/g, '""')}"`,
+      `"${(lead.job_title || "").replace(/"/g, '""')}"`,
       `"${(lead.company || "").replace(/"/g, '""')}"`,
       `"${(lead.email || "").replace(/"/g, '""')}"`,
-      `"${(lead.linkedin_url || "").replace(/"/g, '""')}"`,
       `"${lead.status}"`
     ].join(","));
     
@@ -178,8 +179,8 @@ export default function LeadsTable({ refreshKey }: LeadsTableProps) {
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="font-semibold">Name</TableHead>
                   <TableHead className="font-semibold">LinkedIn</TableHead>
-                  <TableHead className="font-semibold">Job Title</TableHead>
-                  <TableHead className="font-semibold">Company</TableHead>
+                  <TableHead className="font-semibold">Headline</TableHead>
+                  <TableHead className="font-semibold">Inferred Company</TableHead>
                   <TableHead className="font-semibold">Email</TableHead>
                   <TableHead className="font-semibold text-center">Status</TableHead>
                 </TableRow>
@@ -214,8 +215,8 @@ export default function LeadsTable({ refreshKey }: LeadsTableProps) {
                         <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {lead.job_title || lead.headline || "—"}
+                    <TableCell className="text-muted-foreground text-sm max-w-[250px] truncate" title={lead.headline || undefined}>
+                      {lead.headline || "—"}
                     </TableCell>
                     <TableCell className="font-medium text-foreground">
                       {lead.company || "—"}

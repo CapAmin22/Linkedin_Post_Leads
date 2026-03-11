@@ -150,16 +150,17 @@ function fallbackRegexParse(headline: string): ParsedTitle {
 // ─── AI Parsing: Groq → Gemini → OpenAI → Regex ──────────────────
 
 function buildPrompt(headlines: string): string {
-  return `Goal: Extract professional details from LinkedIn headlines.
-Input: A numbered list of headlines.
-Task: For each headline, extract the "Job Title" and the "Company Name".
+  return `Goal: Extract the true "Job Title" and true "Company Name" from LinkedIn headlines.
+Input: A numbered list of raw LinkedIn headlines.
+Task: Analyze the headline to strictly isolate their primary Job Title and their Employer (Company).
 Output: Return a JSON object with a "results" key containing an array. Each element MUST have: {"index": <number>, "jobTitle": "<string>", "company": "<string>"}.
 
-Rules:
-1. The "index" in your JSON MUST exactly match the number preceding the headline in the input.
-2. If the company is mentioned with "@", "at", " | ", " - ", or ",", extract it.
-3. If company is not found, use an empty string.
-4. Return ONLY valid JSON. No text outside the JSON.
+CRITICAL RULES:
+1. The "index" MUST exactly match the number in the input list.
+2. DO NOT just copy the entire headline into the jobTitle. Extract ONLY the specific role (e.g., "Founder", "Software Engineer", "CEO").
+3. DO NOT confuse general statements for a company. If the headline is "Helping startups grow" or "Researcher", the company is MISSING. Set company to "".
+4. Look for indicators like "@", "at", " | ", or " - " to find the true company.
+5. If you cannot confidently detect a real company name, leave "company" blank. This prevents downstream API errors.
 
 Headlines:
 ${headlines}`;
