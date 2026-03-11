@@ -1,35 +1,13 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { tasks } from "@trigger.dev/sdk/v3";
-import type { scrapeLeadsTask } from "@/trigger/scrape-leads";
+import { runPipeline } from "@/lib/pipeline";
+
+export const maxDuration = 60; // Vercel function timeout (seconds)
 
 export async function POST(request: Request) {
   try {
     // Authenticate the user
-    console.log("Authenticating user...");
     const supabase = await createClient();
-
-    // Key Validation Diagnostics
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    const triggerKey = process.env.TRIGGER_SECRET_KEY;
-
-    if (!supabaseUrl || !supabaseKey || !triggerKey) {
-      console.error("Missing critical environment variables:", { supabaseUrl: !!supabaseUrl, supabaseKey: !!supabaseKey, triggerKey: !!triggerKey });
-      return NextResponse.json({ 
-        error: "Configuration Error", 
-        details: "One or more API keys are missing in the environment. Check your Vercel settings.",
-        missing: { supabaseUrl: !supabaseUrl, supabaseKey: !supabaseKey, triggerKey: !triggerKey }
-      }, { status: 500 });
-    }
-
-    if (supabaseKey && !supabaseKey.startsWith("eyJ")) {
-      console.warn("WARNING: NEXT_PUBLIC_SUPABASE_ANON_KEY does not look like a standard Supabase JWT key.");
-    }
-
-    if (triggerKey && !triggerKey.startsWith("tr_dev_") && !triggerKey.startsWith("tr_prod_")) {
-      console.warn("WARNING: TRIGGER_SECRET_KEY does not look like a valid Trigger.dev key. Expected prefix: tr_dev_ (local) or tr_prod_ (production).");
-    }
 
     const {
       data: { user },
@@ -37,19 +15,15 @@ export async function POST(request: Request) {
     } = await supabase.auth.getUser();
 
     if (authError || !user) {
-      console.error("Auth error:", authError);
-      return NextResponse.json({ 
-        error: "Unauthorized", 
-        details: "You must be logged in to use this feature. Also, check if your SUPABASE_ANON_KEY is valid.",
-        authError: authError?.message 
-      }, { status: 401 });
+      return NextResponse.json(
+        { error: "Unauthorized", details: authError?.message },
+        { status: 401 }
+      );
     }
-    console.log("User authenticated:", user.id);
 
     // Validate the request body
     const body = await request.json();
     const { url } = body;
-    console.log("Request URL:", url);
 
     if (!url || typeof url !== "string") {
       return NextResponse.json(
@@ -65,42 +39,28 @@ export async function POST(request: Request) {
       );
     }
 
-    // Dispatch the Trigger.dev task
-    try {
-      if (!triggerKey || (!triggerKey.startsWith("tr_dev_") && !triggerKey.startsWith("tr_prod_"))) {
-        throw new Error("Invalid TRIGGER_SECRET_KEY. Use a Secret Key starting with 'tr_dev_' (local) or 'tr_prod_' (production).");
-      }
+    // Run the pipeline directly (no Trigger.dev)
+    const result = await runPipeline(url, user.id);
 
-      console.log("Triggering task 'scrape-leads'...");
-      const handle = await tasks.trigger<typeof scrapeLeadsTask>(
-        "scrape-leads",
-        {
-          url,
-          userId: user.id,
-        }
-      );
-      console.log("Task triggered successfully, job ID:", handle.id);
-      return NextResponse.json({ jobId: handle.id }, { status: 200 });
-    } catch (triggerError: any) {
-      console.error("Trigger.dev error:", triggerError);
+    if (!result.success) {
       return NextResponse.json(
-        { 
-          error: "Failed to start background job", 
-          details: triggerError?.message,
-          suggestion: "Ensure you are using a Trigger.dev v3 Secret Key (tr_sk_...) and that 'npx trigger.dev@latest dev' is running."
-        },
+        { error: "Pipeline failed", details: result.error, steps: result.steps },
         { status: 500 }
       );
     }
-  } catch (error: any) {
-    console.error("Scrape API error details:", error);
+
     return NextResponse.json(
-      { 
-        error: "Internal server error", 
-        details: error?.message, 
-        stack: error?.stack,
-        name: error?.name
+      {
+        success: true,
+        leadsProcessed: result.leadsProcessed,
+        steps: result.steps,
       },
+      { status: 200 }
+    );
+  } catch (error: any) {
+    console.error("Scrape API error:", error);
+    return NextResponse.json(
+      { error: "Internal server error", details: error?.message },
       { status: 500 }
     );
   }

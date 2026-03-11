@@ -1,35 +1,37 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import DashboardHeader from "@/components/DashboardHeader";
 import ScrapeForm from "@/components/ScrapeForm";
 import LeadsTable from "@/components/LeadsTable";
-import JobStatusBadge from "@/components/JobStatusBadge";
 
 export default function DashboardPage() {
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  // Increment to force LeadsTable to re-fetch
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const handleComplete = useCallback((leadsProcessed: number) => {
+    if (leadsProcessed > 0) {
+      setRefreshKey((k) => k + 1);
+    }
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/20">
       <DashboardHeader />
 
       <main className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        {/* Stats overview */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-bold tracking-tight">Dashboard</h2>
-            <p className="text-muted-foreground">
-              Extract and enrich leads from LinkedIn post engagement.
-            </p>
-          </div>
-          <JobStatusBadge jobId={activeJobId} />
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight">Dashboard</h2>
+          <p className="text-muted-foreground">
+            Extract and enrich leads from LinkedIn post engagement.
+          </p>
         </div>
 
         {/* Scrape form */}
-        <ScrapeForm onJobStarted={(jobId) => setActiveJobId(jobId)} />
+        <ScrapeForm onComplete={handleComplete} />
 
         {/* Leads table */}
-        <LeadsTable activeJobId={activeJobId} />
+        <LeadsTable refreshKey={refreshKey} />
       </main>
     </div>
   );

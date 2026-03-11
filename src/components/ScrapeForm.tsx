@@ -12,13 +12,14 @@ import {
 } from "@/components/ui/card";
 
 interface ScrapeFormProps {
-  onJobStarted: (jobId: string) => void;
+  onComplete: (leadsProcessed: number) => void;
 }
 
-export default function ScrapeForm({ onJobStarted }: ScrapeFormProps) {
+export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [statusText, setStatusText] = useState<string | null>(null);
 
   const isValidLinkedInUrl = (url: string) => {
     return /^https?:\/\/(www\.)?linkedin\.com\//.test(url);
@@ -27,6 +28,7 @@ export default function ScrapeForm({ onJobStarted }: ScrapeFormProps) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setStatusText(null);
 
     if (!isValidLinkedInUrl(url)) {
       setError("Please enter a valid LinkedIn URL");
@@ -34,6 +36,8 @@ export default function ScrapeForm({ onJobStarted }: ScrapeFormProps) {
     }
 
     setLoading(true);
+    setStatusText("Extracting leads... this takes 15-30 seconds");
+
     try {
       const res = await fetch("/api/scrape", {
         method: "POST",
@@ -44,15 +48,20 @@ export default function ScrapeForm({ onJobStarted }: ScrapeFormProps) {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || "Failed to start scraping job");
+        throw new Error(data.error || data.details || "Failed to extract leads");
       }
 
-      onJobStarted(data.jobId);
+      setStatusText(`Done! ${data.leadsProcessed} leads extracted.`);
+      onComplete(data.leadsProcessed);
       setUrl("");
+
+      // Clear success message after 5s
+      setTimeout(() => setStatusText(null), 5000);
     } catch (err: unknown) {
       const errorMessage =
         err instanceof Error ? err.message : "Something went wrong";
       setError(errorMessage);
+      setStatusText(null);
     } finally {
       setLoading(false);
     }
@@ -120,7 +129,7 @@ export default function ScrapeForm({ onJobStarted }: ScrapeFormProps) {
                     d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
                   />
                 </svg>
-                Starting...
+                Extracting...
               </span>
             ) : (
               <span className="flex items-center gap-2">
@@ -142,6 +151,20 @@ export default function ScrapeForm({ onJobStarted }: ScrapeFormProps) {
             )}
           </Button>
         </form>
+
+        {/* Status / progress text */}
+        {statusText && !error && (
+          <div className="mt-3 rounded-lg bg-primary/10 border border-primary/20 p-3 text-sm text-primary flex items-center gap-2">
+            {loading && (
+              <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            )}
+            {statusText}
+          </div>
+        )}
+
         {error && (
           <div className="mt-3 rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
             {error}

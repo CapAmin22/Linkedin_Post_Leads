@@ -34,10 +34,10 @@ interface Lead {
 }
 
 interface LeadsTableProps {
-  activeJobId: string | null;
+  refreshKey: number;
 }
 
-export default function LeadsTable({ activeJobId }: LeadsTableProps) {
+export default function LeadsTable({ refreshKey }: LeadsTableProps) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const supabase = useMemo(() => createClient(), []);
@@ -55,26 +55,15 @@ export default function LeadsTable({ activeJobId }: LeadsTableProps) {
     setLoading(false);
   }, [supabase]);
 
+  // Fetch on mount and whenever refreshKey changes
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchLeads();
-  }, [fetchLeads]);
-
-  // Poll for new leads while a job is active
-  useEffect(() => {
-    if (!activeJobId) return;
-
-    const interval = setInterval(fetchLeads, 3000);
-    return () => clearInterval(interval);
-  }, [activeJobId, fetchLeads]);
+  }, [fetchLeads, refreshKey]);
 
   const exportToCsv = () => {
     if (leads.length === 0) return;
     
-    // Define headers
     const headers = ["Name", "Job Title", "Company", "Email", "LinkedIn URL", "Status"];
-    
-    // Map leads to CSV rows
     const csvRows = leads.map(lead => [
       `"${(lead.full_name || "").replace(/"/g, '""')}"`,
       `"${(lead.job_title || lead.headline || "").replace(/"/g, '""')}"`,
@@ -84,10 +73,7 @@ export default function LeadsTable({ activeJobId }: LeadsTableProps) {
       `"${lead.status}"`
     ].join(","));
     
-    // Combine headers and rows
     const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...csvRows].join("\n");
-    
-    // Create download link
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
@@ -139,12 +125,7 @@ export default function LeadsTable({ activeJobId }: LeadsTableProps) {
                 : `${leads.length} lead${leads.length !== 1 ? "s" : ""} found`}
             </CardDescription>
           </div>
-          {activeJobId ? (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <div className="h-2 w-2 rounded-full bg-chart-1 animate-pulse" />
-              Live updating
-            </div>
-          ) : leads.length > 0 ? (
+          {leads.length > 0 && (
             <Button 
               variant="outline" 
               size="sm" 
@@ -158,7 +139,7 @@ export default function LeadsTable({ activeJobId }: LeadsTableProps) {
               </svg>
               Export CSV
             </Button>
-          ) : null}
+          )}
         </div>
       </CardHeader>
       <CardContent>
