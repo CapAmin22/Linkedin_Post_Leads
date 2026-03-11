@@ -10,6 +10,8 @@ interface NormalizedProfile {
 interface ParsedTitle {
   jobTitle: string;
   company: string;
+  companyUrl?: string; // Deep Dive extracted
+  companyDomain?: string; // Domain Hunt extracted
 }
 
 interface EnrichedLead {
@@ -74,6 +76,41 @@ async function retryFetch(
     }
   }
   throw lastError;
+}
+
+// ─── Apify Generic Runner ──────────────────────────────────────────────
+async function runApifyActor(
+  actorId: string,
+  payload: Record<string, any>,
+  timeoutSecs = 30
+): Promise<any[]> {
+  const token = process.env.APIFY_API_TOKEN;
+  if (!token) return [];
+
+  try {
+    const runRes = await fetch(
+      `https://api.apify.com/v2/acts/${actorId}/runs?token=${token}&waitForFinish=${timeoutSecs}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    if (!runRes.ok) return [];
+
+    const runData = await runRes.json();
+    if (runData.data?.status !== "SUCCEEDED" || runData.error) return [];
+
+    const datasetId = runData.data.defaultDatasetId;
+    const itemsRes = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}`);
+    if (!itemsRes.ok) return [];
+
+    return await itemsRes.json();
+  } catch (error) {
+    console.error(`Apify actor ${actorId} failed:`, error);
+    return [];
+  }
 }
 
 // ─── Apify Data Normalizer ────────────────────────────────────────────
@@ -333,7 +370,7 @@ async function enrichSingleProfile(
   if (!email && fullName && company && process.env.HUNTER_API_KEY) {
     try {
       const nameParts = fullName.split(" ");
-      let domain = "";
+      let domain = parsed?.companyDomain || "";
       // Clean messy company names (Pro Level)
       // Remove common marketing noise like "Helping...", "🚀", "Scaling..."
       let cleanCompany = company
@@ -346,7 +383,7 @@ async function enrichSingleProfile(
 
       if (!cleanCompany && company) cleanCompany = company.split(" ")[0]; // Use first word as last resort
 
-      if (cleanCompany) {
+      if (cleanCompany && !domain) {
         // Hunter Domain Search
         const dsRes = await fetchWithTimeout(
           `https://api.hunter.io/v2/domain-search?company=${encodeURIComponent(cleanCompany)}&api_key=${process.env.HUNTER_API_KEY}`
@@ -480,18 +517,60 @@ export async function runPipeline(
     return;
   }
 
-  // ── Step 2: AI Parsing (Groq → Gemini → OpenAI → Regex) ───────────────────
-  onEvent({ type: "step", message: "🤖 Step 2/4 — Parsing job titles (Groq → Gemini → OpenAI → Regex)..." });
+  // ── Step 2: Waterfall Deep Dive (Apify Profiles → AI Parsing) ───────────────────
+  onEvent({ type: "step", message: "🤖 Step 2/4 — Deep Dive: Extracting True Experience & Companies..." });
 
   const parsedTitles: Map<number, ParsedTitle> = new Map();
-  const headlines = profiles
-    .map((p, i) => `${i}. "${p.headline || "N/A"}"`)
-    .join("\n");
-  const prompt = buildPrompt(headlines);
+  let deepDiveUsed = false;
+  
+  const validUrls = profiles.map(p => p.linkedinUrl).filter(url => url && url.startsWith("http"));
+  if (validUrls.length > 0 && process.env.APIFY_API_TOKEN) {
+      onEvent({ type: "step", message: "⚙️ Attempting HarvestAPI Profile Scraper..." });
+      // We pass both 'urls' and 'profileUrls' as different actors use different input keys
+      let deepItems = await runApifyActor("harvestapi~linkedin-profile-scraper", { urls: validUrls, profileUrls: validUrls }, 30);
+      
+      if (deepItems.length === 0) {
+          onEvent({ type: "step", message: "⚙️ HarvestAPI empty/failed. Attempting dev_fusion Profile Scraper..." });
+          deepItems = await runApifyActor("dev_fusion~linkedin-profile-scraper", { profileUrls: validUrls }, 30);
+      }
+      
+      if (deepItems.length > 0) {
+          deepDiveUsed = true;
+          profiles.forEach((p, i) => {
+              const matched = deepItems.find(d => 
+                  d.linkedinUrl === p.linkedinUrl || 
+                  d.url === p.linkedinUrl || 
+                  d.profileUrl === p.linkedinUrl || 
+                  (d.publicIdentifier && p.linkedinUrl.includes(d.publicIdentifier))
+              );
+              if (matched) {
+                  const company = matched.company || matched.companyName || matched.experiences?.[0]?.company || matched.experience?.[0]?.companyName || "";
+                  const jobTitle = matched.jobTitle || matched.headline || matched.experiences?.[0]?.title || matched.experience?.[0]?.title || "";
+                  const companyUrl = matched.companyUrl || matched.experiences?.[0]?.companyUrl || matched.experience?.[0]?.companyUrl || "";
+                  if (company || jobTitle) {
+                      parsedTitles.set(i, { jobTitle, company, companyUrl });
+                  }
+              }
+          });
+      }
+  }
 
-  let aiUsed = "none";
+  // Fallback to AI Parser if Apify failed or incomplete
+  let aiUsed = deepDiveUsed ? "Apify Deep Dive" : "none";
+  
+  if (!deepDiveUsed || parsedTitles.size < profiles.length) {
+      if (deepDiveUsed) {
+          onEvent({ type: "step", message: "⚠️ Apify Deep Dive incomplete. Firing AI Inference Fallback..." });
+      } else {
+          onEvent({ type: "step", message: "⚠️ Apify actors not rented or failed. Firing fast AI Inference Fallback..." });
+      }
 
-  // Tier 1: Groq
+      const headlines = profiles
+        .map((p, i) => `${i}. "${p.headline || "N/A"}"`)
+        .join("\n");
+      const prompt = buildPrompt(headlines);
+
+      // Tier 1: Groq
   if (process.env.GROQ_API_KEY) {
     try {
       const text = await parseWithGroq(prompt);
@@ -556,6 +635,33 @@ export async function runPipeline(
     });
     aiUsed = "Regex";
     onEvent({ type: "step", message: `✅ Regex extracted ${parsedTitles.size} titles from headlines` });
+  }
+  
+  } // END of if (!deepDiveUsed || parsedTitles.size < profiles.length)
+
+  // ── Step 2.5: Waterfall Domain Hunt (Apify Companies) ───────────────────
+  // If the Deep Dive found company LinkedIn URLs, pass them to curious_coder to get the actual websites
+  const companyUrlsToHunt = Array.from(parsedTitles.values())
+    .map(pt => pt.companyUrl)
+    .filter(url => url && url.startsWith("http"));
+
+  if (companyUrlsToHunt.length > 0 && process.env.APIFY_API_TOKEN) {
+      onEvent({ type: "step", message: `🏢 Step 2.5/4 — Domain Hunt: Resolving ${companyUrlsToHunt.length} Company URLs via Apify...` });
+      const companyItems = await runApifyActor("curious_coder~linkedin-company-scraper", { urls: companyUrlsToHunt }, 30);
+      
+      if (companyItems.length > 0) {
+          // Map the domains back to the parsedTitles
+          companyItems.forEach(item => {
+              if (item.url && item.website) {
+                  // Find all matching parsedTitles and inject the domain
+                  parsedTitles.forEach(pt => {
+                      if (pt.companyUrl === item.url || (item.publicIdentifier && pt.companyUrl?.includes(item.publicIdentifier))) {
+                          pt.companyDomain = item.website;
+                      }
+                  });
+              }
+          });
+      }
   }
 
   // ── Step 3: Email Enrichment ──────────────────────────────────────
