@@ -243,7 +243,7 @@ export async function runPipeline(
   const parsedTitles: Map<number, ParsedTitle> = new Map();
   try {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
     const headlines = profiles
       .map((p, i) => `${i + 1}. "${p.headline || p.reactor?.headline || "N/A"}"`)
