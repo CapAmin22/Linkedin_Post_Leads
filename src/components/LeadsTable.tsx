@@ -179,8 +179,9 @@ export default function LeadsTable({ refreshKey }: LeadsTableProps) {
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="font-semibold">Name</TableHead>
                   <TableHead className="font-semibold">LinkedIn</TableHead>
-                  <TableHead className="font-semibold">Headline</TableHead>
-                  <TableHead className="font-semibold">Inferred Company</TableHead>
+                  <TableHead className="font-semibold">Raw Headline</TableHead>
+                  <TableHead className="font-semibold text-primary/80">Refined Job Title</TableHead>
+                  <TableHead className="font-semibold text-primary/80">Refined Company</TableHead>
                   <TableHead className="font-semibold">Email</TableHead>
                   <TableHead className="font-semibold text-center">Status</TableHead>
                 </TableRow>
@@ -215,10 +216,13 @@ export default function LeadsTable({ refreshKey }: LeadsTableProps) {
                         <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
-                    <TableCell className="text-muted-foreground text-sm max-w-[250px] truncate" title={lead.headline || undefined}>
+                    <TableCell className="text-muted-foreground text-xs max-w-[180px] truncate italic" title={lead.headline || undefined}>
                       {lead.headline || "—"}
                     </TableCell>
-                    <TableCell className="font-medium text-foreground">
+                    <TableCell className="font-medium text-foreground max-w-[150px] truncate" title={lead.job_title || undefined}>
+                      {lead.job_title || "—"}
+                    </TableCell>
+                    <TableCell className="font-bold text-primary/90 max-w-[150px] truncate" title={lead.company || undefined}>
                       {lead.company || "—"}
                     </TableCell>
                     <TableCell>

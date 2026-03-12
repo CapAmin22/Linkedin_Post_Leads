@@ -562,11 +562,13 @@ export async function runPipeline(
                  const dUrl2 = (d.url || "").split('?')[0].replace(/\/$/, "").toLowerCase();
                  const dUrl3 = (d.profileUrl || "").split('?')[0].replace(/\/$/, "").toLowerCase();
                  const pId = d.publicIdentifier ? d.publicIdentifier.toLowerCase() : "";
+                 const dId = d.id ? d.id.toLowerCase() : "";
                  
                  return (dUrl1 && pCleanUrl.includes(dUrl1)) || 
                         (dUrl2 && pCleanUrl.includes(dUrl2)) || 
                         (dUrl3 && pCleanUrl.includes(dUrl3)) || 
-                        (pId && pCleanUrl.includes(pId));
+                        (pId && pCleanUrl.includes(pId)) ||
+                        (dId && pCleanUrl.includes(dId));
               });
               // Bypass error objects returned from actors locking out free tier via API
               if (matched && !matched.error) {
@@ -736,7 +738,7 @@ export async function runPipeline(
 
   const { error: insertError } = await supabase
     .from("scraped_leads")
-    .insert(leadsToInsert);
+    .upsert(leadsToInsert, { onConflict: "linkedin_url,source_url" });
 
   if (insertError) {
     onEvent({
