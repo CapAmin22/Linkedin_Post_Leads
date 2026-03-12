@@ -738,7 +738,7 @@ export async function runPipeline(
 
   const { error: insertError } = await supabase
     .from("scraped_leads")
-    .upsert(leadsToInsert, { onConflict: "linkedin_url,source_url" });
+    .insert(leadsToInsert);
 
   if (insertError) {
     onEvent({
