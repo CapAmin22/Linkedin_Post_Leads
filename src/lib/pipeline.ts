@@ -489,13 +489,14 @@ export async function runPipeline(
 
   let rawItems: Record<string, any>[] = [];
   try {
+    onEvent({ type: "step", message: "🔍 Step 1/4 — Scraping LinkedIn post (Top 20 reactive leads for speed)..." });
     const actorId = "apimaestro~linkedin-post-reactions";
     const runRes = await fetch(
-      `https://api.apify.com/v2/acts/${actorId}/runs?token=${apifyToken}&waitForFinish=90`,
+      `https://api.apify.com/v2/acts/${actorId}/runs?token=${apifyToken}&waitForFinish=45`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ post_urls: [postUrl], limit: 100 }),
+        body: JSON.stringify({ post_urls: [postUrl], limit: 20 }),
       }
     );
 
@@ -544,12 +545,12 @@ export async function runPipeline(
   const validUrls = profiles.map(p => p.linkedinUrl).filter(url => url && url.startsWith("http"));
   if (validUrls.length > 0 && process.env.APIFY_API_TOKEN) {
       onEvent({ type: "step", message: "⚙️ Attempting HarvestAPI Profile Scraper (Deep Dive)..." });
-      // Bulk scrapers take time. Increased wait to 120s.
-      let deepItems = await runApifyActor("harvestapi~linkedin-profile-scraper", { urls: validUrls, profileUrls: validUrls }, 120);
+      // Reduced wait to 45s for Vercel stability
+      let deepItems = await runApifyActor("harvestapi~linkedin-profile-scraper", { urls: validUrls, profileUrls: validUrls }, 45);
       
       if (deepItems.length === 0) {
           onEvent({ type: "step", message: "⚙️ HarvestAPI empty/failed. Trying dev_fusion as fallback..." });
-          deepItems = await runApifyActor("dev_fusion~linkedin-profile-scraper", { profileUrls: validUrls }, 90);
+          deepItems = await runApifyActor("dev_fusion~linkedin-profile-scraper", { profileUrls: validUrls }, 30);
       }
       
       if (deepItems.length > 0) {

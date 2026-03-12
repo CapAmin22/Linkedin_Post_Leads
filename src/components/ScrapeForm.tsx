@@ -73,7 +73,7 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
-        buffer = lines.pop() || ""; // Keep incomplete line in buffer
+        buffer = lines.pop() || ""; 
 
         for (const line of lines) {
           if (line.startsWith("data: ")) {
@@ -82,7 +82,16 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
 
             try {
               const event: PipelineEvent = JSON.parse(payload);
-              setSteps((prev) => [...prev, event]);
+              
+              // Handle heartbeats: only keep the newest one to avoid clutter
+              if (event.message.includes("Heartbeat")) {
+                  setSteps((prev) => {
+                      const filtered = prev.filter(s => !s.message.includes("Heartbeat"));
+                      return [...filtered, event];
+                  });
+              } else {
+                  setSteps((prev) => [...prev, event]);
+              }
 
               if (event.type === "error") {
                 setError(event.message);
@@ -102,9 +111,10 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
         onComplete(leadsProcessed, url);
         setUrl("");
       }
-    } catch (err: unknown) {
-      const errorMessage =
-        err instanceof Error ? err.message : "Something went wrong";
+    } catch (err: any) {
+      const isTimeout = err.name === "AbortError" || err.message?.includes("body stream");
+      const errorMessage = isTimeout ? "Connection timed out (Vercel limit). Try a smaller post or check your internet." : (err instanceof Error ? err.message : "Something went wrong");
+      
       setError(errorMessage);
       setSteps((prev) => [
         ...prev,

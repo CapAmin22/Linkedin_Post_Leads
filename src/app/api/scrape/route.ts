@@ -46,6 +46,11 @@ export async function POST(request: Request) {
           controller.enqueue(encoder.encode(`data: ${data}\n\n`));
         };
 
+        // Add a heartbeat to keep the connection alive
+        const heartbeat = setInterval(() => {
+          controller.enqueue(encoder.encode(`data: {"type":"step","message":"📡 Heartbeat: Processing..."}\n\n`));
+        }, 10000);
+
         try {
           await runPipeline(url, user.id, sendEvent);
         } catch (error: any) {
@@ -53,6 +58,8 @@ export async function POST(request: Request) {
             type: "error",
             message: `❌ Unexpected error: ${error?.message || "Unknown error"}`,
           });
+        } finally {
+          clearInterval(heartbeat);
         }
 
         // Signal end of stream
