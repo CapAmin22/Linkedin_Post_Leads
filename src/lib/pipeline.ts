@@ -109,7 +109,22 @@ async function runApifyActor(
     const itemsRes = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}`);
     if (!itemsRes.ok) return [];
 
-    return await itemsRes.json();
+    let items = await itemsRes.json();
+    
+    // If we got 0 items but the run is still RUNNING or READY, wait a bit and poll
+    if (items.length === 0 && (runData.data?.status === "RUNNING" || runData.data?.status === "READY")) {
+        console.log(`Apify run ${runData.data.id} still in progress. Polling for items...`);
+        for (let attempt = 0; attempt < 5; attempt++) {
+            await new Promise(r => setTimeout(r, 6000)); // Wait 6s per poll
+            const pollRes = await fetch(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${token}`);
+            if (pollRes.ok) {
+                items = await pollRes.json();
+                if (items.length > 0) break;
+            }
+        }
+    }
+
+    return items;
   } catch (error) {
     console.error(`Apify actor ${actorId} failed:`, error);
     return [];
@@ -528,13 +543,13 @@ export async function runPipeline(
   
   const validUrls = profiles.map(p => p.linkedinUrl).filter(url => url && url.startsWith("http"));
   if (validUrls.length > 0 && process.env.APIFY_API_TOKEN) {
-      onEvent({ type: "step", message: "⚙️ Attempting HarvestAPI Profile Scraper..." });
-      // We pass both 'urls' and 'profileUrls' as different actors use different input keys
-      let deepItems = await runApifyActor("harvestapi~linkedin-profile-scraper", { urls: validUrls, profileUrls: validUrls }, 30);
+      onEvent({ type: "step", message: "⚙️ Attempting HarvestAPI Profile Scraper (Deep Dive)..." });
+      // Bulk scrapers take time. Increased wait to 120s.
+      let deepItems = await runApifyActor("harvestapi~linkedin-profile-scraper", { urls: validUrls, profileUrls: validUrls }, 120);
       
       if (deepItems.length === 0) {
-          onEvent({ type: "step", message: "⚙️ HarvestAPI empty/failed. Attempting dev_fusion Profile Scraper..." });
-          deepItems = await runApifyActor("dev_fusion~linkedin-profile-scraper", { profileUrls: validUrls }, 30);
+          onEvent({ type: "step", message: "⚙️ HarvestAPI empty/failed. Trying dev_fusion as fallback..." });
+          deepItems = await runApifyActor("dev_fusion~linkedin-profile-scraper", { profileUrls: validUrls }, 90);
       }
       
       if (deepItems.length > 0) {
@@ -555,9 +570,28 @@ export async function runPipeline(
               });
               // Bypass error objects returned from actors locking out free tier via API
               if (matched && !matched.error) {
-                  const company = matched.company || matched.companyName || matched.experiences?.[0]?.company || matched.experience?.[0]?.companyName || "";
-                  const jobTitle = matched.jobTitle || matched.headline || matched.experiences?.[0]?.title || matched.experience?.[0]?.position || "";
-                  const companyUrl = matched.companyUrl || matched.experiences?.[0]?.companyUrl || matched.experience?.[0]?.companyLinkedinUrl || "";
+                  const firstExp = matched.experience?.[0] || matched.experiences?.[0] || {};
+                  
+                  const company = matched.company || 
+                                 matched.companyName || 
+                                 matched.currentPosition?.companyName ||
+                                 firstExp.companyName || 
+                                 firstExp.company || 
+                                 "";
+
+                  const jobTitle = matched.jobTitle || 
+                                   matched.headline || 
+                                   matched.currentPosition?.title ||
+                                   firstExp.title || 
+                                   firstExp.position || 
+                                   "";
+
+                  const companyUrl = matched.companyUrl || 
+                                     matched.currentPosition?.companyLinkedinUrl ||
+                                     firstExp.companyLinkedinUrl || 
+                                     firstExp.companyUrl || 
+                                     "";
+
                   if (company || jobTitle) {
                       parsedTitles.set(i, { jobTitle, company, companyUrl });
                   }
@@ -587,7 +621,7 @@ export async function runPipeline(
       const text = await parseWithGroq(prompt);
       const parsed = extractParsedArray(text);
       parsed.forEach((item) => {
-        if (item.index !== undefined) {
+        if (item.index !== undefined && !parsedTitles.has(item.index)) {
           parsedTitles.set(item.index, { jobTitle: item.jobTitle, company: item.company });
         }
       });
@@ -602,12 +636,12 @@ export async function runPipeline(
   }
 
   // Tier 2: Gemini
-  if (parsedTitles.size === 0 && process.env.GEMINI_API_KEY) {
+  if (parsedTitles.size < profiles.length && process.env.GEMINI_API_KEY) {
     try {
       const text = await parseWithGemini(prompt);
       const parsed = extractParsedArray(text);
       parsed.forEach((item) => {
-        if (item.index !== undefined) parsedTitles.set(item.index, { jobTitle: item.jobTitle, company: item.company });
+        if (item.index !== undefined && !parsedTitles.has(item.index)) parsedTitles.set(item.index, { jobTitle: item.jobTitle, company: item.company });
       });
       aiUsed = "Gemini";
       onEvent({ type: "step", message: `✅ Gemini parsed ${parsedTitles.size} job titles` });
@@ -621,12 +655,12 @@ export async function runPipeline(
   }
 
   // Tier 3: OpenAI
-  if (parsedTitles.size === 0 && process.env.OPENAI_API_KEY) {
+  if (parsedTitles.size < profiles.length && process.env.OPENAI_API_KEY) {
     try {
       const text = await parseWithOpenAI(prompt);
       const parsed = extractParsedArray(text);
       parsed.forEach((item) => {
-        if (item.index !== undefined) parsedTitles.set(item.index, { jobTitle: item.jobTitle, company: item.company });
+        if (item.index !== undefined && !parsedTitles.has(item.index)) parsedTitles.set(item.index, { jobTitle: item.jobTitle, company: item.company });
       });
       aiUsed = "OpenAI";
       onEvent({ type: "step", message: `✅ OpenAI parsed ${parsedTitles.size} job titles` });
@@ -658,7 +692,7 @@ export async function runPipeline(
 
   if (companyUrlsToHunt.length > 0 && process.env.APIFY_API_TOKEN) {
       onEvent({ type: "step", message: `🏢 Step 2.5/4 — Domain Hunt: Resolving ${companyUrlsToHunt.length} Company URLs via Apify...` });
-      const companyItems = await runApifyActor("curious_coder~linkedin-company-scraper", { urls: companyUrlsToHunt }, 30);
+      const companyItems = await runApifyActor("curious_coder~linkedin-company-scraper", { urls: companyUrlsToHunt }, 60);
       
       if (companyItems.length > 0) {
           // Map the domains back to the parsedTitles
