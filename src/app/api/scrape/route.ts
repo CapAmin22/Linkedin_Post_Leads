@@ -1,7 +1,9 @@
 import { createClient } from "@/lib/supabase/server";
 import { runPipeline, type PipelineEvent } from "@/lib/pipeline";
 
-export const maxDuration = 60; // Vercel function timeout
+// 300s = Vercel Pro max. Hobby plan is capped at 60s — deploy scraper
+// service locally or on Railway/Render so the heavy work happens there.
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   try {

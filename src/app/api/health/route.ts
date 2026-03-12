@@ -65,7 +65,38 @@ export async function GET() {
     status: hunterKey && hunterKey.length > 10 ? "✅ Set" : "⚠️ Missing (optional)",
   };
 
-  // 7. Quick Supabase connection test
+  // 7. Scraper Service
+  const scraperUrl = process.env.SCRAPER_SERVICE_URL;
+  const linkedinEmail = process.env.LINKEDIN_EMAIL;
+  const linkedinPassword = process.env.LINKEDIN_PASSWORD;
+
+  results.scraper_service = {
+    status: scraperUrl ? "✅ Set" : "❌ Missing (Python service required)",
+    detail: scraperUrl || undefined,
+  };
+  results.scraper_credentials = {
+    status: linkedinEmail && linkedinPassword ? "✅ Set" : "❌ Missing",
+  };
+
+  // 8. Quick Scraper connection test
+  if (scraperUrl) {
+    try {
+      const res = await fetch(`${scraperUrl.replace(/\/$/, "")}/health`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      results.scraper_connection = {
+        status: res.ok ? "✅ Connected" : `❌ HTTP ${res.status}`,
+        detail: res.ok ? "Python service is alive" : "Service returned error",
+      };
+    } catch (error: any) {
+      results.scraper_connection = {
+        status: "❌ Connection failed",
+        detail: "Ensure the Python service is running on " + scraperUrl,
+      };
+    }
+  }
+
+  // 9. Quick Supabase connection test
   if (supabaseUrl && supabaseAnonKey?.startsWith("eyJ")) {
     try {
       const res = await fetch(`${supabaseUrl}/rest/v1/scraped_leads?select=count&limit=1`, {
@@ -86,7 +117,7 @@ export async function GET() {
     }
   }
 
-  // 8. Quick Apify test
+  // 10. Quick Apify test (Legacy/Optional)
   if (apifyToken) {
     try {
       const res = await fetch("https://api.apify.com/v2/acts?limit=1", {

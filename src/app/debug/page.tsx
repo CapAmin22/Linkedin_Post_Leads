@@ -26,45 +26,44 @@ export default function DebugPage() {
 
   return (
     <div className="p-8 max-w-2xl mx-auto space-y-6">
-      <h1 className="text-3xl font-bold">System Debugger</h1>
-      <Button onClick={checkStatus} disabled={loading}>
-        {loading ? "Checking..." : "Refresh Status"}
-      </Button>
+      <div className="flex items-center justify-between">
+        <h1 className="text-3xl font-bold">System Status</h1>
+        <Button onClick={checkStatus} disabled={loading} variant="outline">
+          {loading ? "Checking..." : "Refresh Status"}
+        </Button>
+      </div>
 
       {status && (
-        <Card>
+        <Card className="border-border/50">
           <CardHeader>
-            <CardTitle>API & Keys Status</CardTitle>
+            <CardTitle>API & Keys Connection Report</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="font-bold">Supabase URL:</div>
-              <div className="text-muted-foreground">{status.supabase?.url || "Missing"}</div>
-              
-              <div className="font-bold">Supabase Anon Key:</div>
-              <div className={status.supabase?.anonKeyValid ? "text-green-500" : "text-red-500"}>
-                {status.supabase?.anonKeyValid ? "✅ Valid JWT" : "❌ Invalid (Swap detected?)"}
-              </div>
-
-              <div className="font-bold">Trigger.dev Key:</div>
-              <div className={status.trigger?.type === "Secret (Correct)" ? "text-green-500" : "text-red-500"}>
-                {status.trigger?.type}
-              </div>
-
-              <div className="font-bold">Supabase Auth:</div>
-              <div className={status.supabase?.status === "connected" ? "text-green-500" : "text-red-500"}>
-                {status.supabase?.status} {status.supabase?.error && `(${status.supabase.error})`}
-              </div>
+          <CardContent className="space-y-6">
+            <div className="grid grid-cols-1 gap-4">
+              {Object.entries(status).map(([key, val]: [string, any]) => (
+                <div key={key} className="flex items-center justify-between border-b pb-2 border-border/20 last:border-0 hover:bg-muted/30 px-2 py-1 rounded transition-colors">
+                  <div className="font-medium text-sm capitalize">{key.replace(/_/g, ' ')}</div>
+                  <div className="flex flex-col items-end">
+                    <div className="text-sm font-semibold">{val.status}</div>
+                    {val.detail && <div className="text-[10px] text-muted-foreground font-mono">{val.detail}</div>}
+                  </div>
+                </div>
+              ))}
             </div>
 
             {status.error && (
-              <div className="p-4 bg-red-100 text-red-700 rounded-md">
+              <div className="p-4 bg-red-100 text-red-700 rounded-md text-sm">
                 Critical Error: {status.error}
               </div>
             )}
             
-            <div className="text-sm text-yellow-600 bg-yellow-50 p-3 rounded border border-yellow-200">
-              <strong>Instructions:</strong> If any item is red, visit the [Walkthrough](file:///C:/Users/HP/.gemini/antigravity/brain/c6da91e1-c156-442c-97d5-27d3fa0a1b83/walkthrough.md) and update your Vercel Environment Variables.
+            <div className="text-xs bg-muted/50 p-4 rounded-lg border border-border/50 space-y-2">
+              <p className="font-semibold text-primary">Troubleshooting Tips:</p>
+              <ul className="list-disc list-inside space-y-1 text-muted-foreground">
+                <li>If **Supabase Connection** is red, check your `NEXT_PUBLIC_` keys.</li>
+                <li>If **Scraper Connection** is red, run `python -m uvicorn main:app` in the /scraper folder.</li>
+                <li>Ensure you have confirmed the user email in the Supabase Dashboard.</li>
+              </ul>
             </div>
           </CardContent>
         </Card>
