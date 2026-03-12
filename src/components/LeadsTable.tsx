@@ -35,25 +35,27 @@ interface Lead {
 
 interface LeadsTableProps {
   refreshKey: number;
+  sourceUrl: string;
 }
 
-export default function LeadsTable({ refreshKey }: LeadsTableProps) {
+export default function LeadsTable({ refreshKey, sourceUrl }: LeadsTableProps) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const supabase = useMemo(() => createClient(), []);
 
   const fetchLeads = useCallback(async () => {
+    setLoading(true);
     const { data, error } = await supabase
       .from("scraped_leads")
       .select("*")
-      .order("created_at", { ascending: false })
-      .limit(100);
+      .eq("source_url", sourceUrl)
+      .order("created_at", { ascending: false });
 
     if (!error && data) {
       setLeads(data);
     }
     setLoading(false);
-  }, [supabase]);
+  }, [supabase, sourceUrl]);
 
   // Fetch on mount and whenever refreshKey changes
   useEffect(() => {

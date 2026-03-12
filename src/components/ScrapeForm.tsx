@@ -18,7 +18,7 @@ interface PipelineEvent {
 }
 
 interface ScrapeFormProps {
-  onComplete: (leadsProcessed: number) => void;
+  onComplete: (leadsProcessed: number, url: string) => void;
 }
 
 export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
@@ -99,7 +99,7 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
       }
 
       if (leadsProcessed > 0) {
-        onComplete(leadsProcessed);
+        onComplete(leadsProcessed, url);
         setUrl("");
       }
     } catch (err: unknown) {
