@@ -66,7 +66,7 @@ export async function GET() {
   };
 
   // 7. Scraper Service
-  const scraperUrl = process.env.SCRAPER_SERVICE_URL;
+  const scraperUrl = process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL;
   const linkedinEmail = process.env.LINKEDIN_EMAIL;
   const linkedinPassword = process.env.LINKEDIN_PASSWORD;
 

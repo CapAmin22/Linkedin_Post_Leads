@@ -1,0 +1,98 @@
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\check_leads.js
+  2:26  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+  3:1   error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\check_users.js
+  2:26  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+  3:1   error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\debug_auth.js
+  2:26  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+  3:1   error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\get_user_id.js
+   2:26  error    A `require()` style import is forbidden     @typescript-eslint/no-require-imports
+   3:1   error    A `require()` style import is forbidden     @typescript-eslint/no-require-imports
+  10:24  warning  'error' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\pro_diagnostic.js
+  1:26  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+  2:25  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+  3:32  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+  4:1   error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\src\app\api\health\route.ts
+   91:14  warning  'error' is defined but never used         @typescript-eslint/no-unused-vars
+   91:21  error    Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  112:21  error    Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  129:21  error    Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\src\app\api\scrape\route.ts
+  58:25  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  80:19  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\src\app\debug\page.tsx
+   8:40  error    Unexpected any. Specify a different type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   @typescript-eslint/no-explicit-any
+  17:14  warning  'e' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              @typescript-eslint/no-unused-vars
+  24:5   error    Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\src\app\debug\page.tsx:24:5
+  22 |
+  23 |   useEffect(() => {
+> 24 |     checkStatus();
+     |     ^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  25 |   }, []);
+  26 |
+  27 |   return (  react-hooks/set-state-in-effect
+  43:65  error    Unexpected any. Specify a different type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   @typescript-eslint/no-explicit-any
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\src\components\LeadsTable.tsx
+  62:5  error  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\src\components\LeadsTable.tsx:62:5
+  60 |   // Fetch on mount and whenever refreshKey changes
+  61 |   useEffect(() => {
+> 62 |     fetchLeads();
+     |     ^^^^^^^^^^ Avoid calling setState() directly within an effect
+  63 |   }, [fetchLeads, refreshKey]);
+  64 |
+  65 |   const exportToCsv = () => {  react-hooks/set-state-in-effect
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\src\components\ScrapeForm.tsx
+  114:19  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\src\lib\pipeline.ts
+   64:18  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+   91:24  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+   93:12  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  114:28  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  261:19  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  271:19  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  282:19  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  419:32  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  420:7   error  'profileMap' is never reassigned. Use 'const' instead  prefer-const
+  420:51  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  430:36  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  441:17  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+  465:33  error  Unexpected any. Specify a different type               @typescript-eslint/no-explicit-any
+
+C:\Users\HP\Downloads\Linkedin Post AI\Linkedin_Post_Leads\verify_login.js
+  2:26  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+  3:1   error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+
+✖ 40 problems (37 errors, 3 warnings)
+  1 error and 0 warnings potentially fixable with the `--fix` option.
+

@@ -1,0 +1,9 @@
+[dotenv@17.3.1] injecting env (0) from .env.local -- tip: ⚙️  write to custom object with { processEnv: myObject }
+Total leads found: 10
+Sample Lead:
+Name: Adam J. Graham
+Email: null
+Company: JustFix
+Source URL: https://www.linkedin.com/feed/update/urn:li:activity:7436534970929704961/
+Status: completed
+Created: 2026-03-11T10:18:01.023763+00:00

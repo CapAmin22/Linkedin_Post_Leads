@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install -r requirements.txt)",
+      "Bash(python -c \":*)",
+      "Bash(npm run build)",
+      "Bash(python -m py_compile linkedin/auth.py linkedin/items.py linkedin/pipelines.py linkedin/reactions.py linkedin/profiles.py linkedin/emails.py main.py)",
+      "Bash(sed 's/=.*//')",
+      "Bash(grep -h \"^import\\\\|^from\" linkedin/*.py main.py)",
+      "Bash(python -c \"from selenium import webdriver; from selenium.webdriver.chrome.options import Options; o=Options\\(\\); o.add_argument\\(''--headless=new''\\); o.add_argument\\(''--no-sandbox''\\); print\\(''Selenium OK''\\)\")",
+      "Bash(npm install playwright)"
+    ]
+  }
+}

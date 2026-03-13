@@ -1,0 +1,8 @@
+[dotenv@17.3.1] injecting env (0) from .env.local -- tip: ⚙️  enable debug logging with { debug: true }
+Total leads found: 10
+Sample Lead:
+Name: Adam J. Graham
+Email: null
+Company: JustFix
+Status: completed
+Created: 2026-03-11T10:18:01.023763+00:00
