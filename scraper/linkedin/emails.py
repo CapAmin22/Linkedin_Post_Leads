@@ -10,7 +10,6 @@ No Apollo, no Hunter, no paid API.
 """
 import re
 import logging
-import socket
 from urllib.parse import urlparse, urljoin
 
 import requests

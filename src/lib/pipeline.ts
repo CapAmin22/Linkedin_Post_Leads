@@ -83,7 +83,7 @@ async function retryFetch(
 // Calls the Python Selenium+Scrapy microservice.
 
 function scraperBase(): string {
-  return (process.env.SCRAPER_SERVICE_URL || "").replace(/\/$/, "");
+  return (process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL || "").replace(/\/$/, "");
 }
 
 async function callScraper(
@@ -234,8 +234,6 @@ async function parseWithOpenAI(prompt: string): Promise<string> {
   return (await res.json()).choices[0].message.content;
 }
 
-// ─── AI Parsing Waterfall ─────────────────────────────────────────────
-
 async function runAIParsing(
   profiles: NormalizedProfile[],
   parsedTitles: Map<number, ParsedTitle>,
@@ -284,7 +282,7 @@ async function runAIParsing(
     }
   }
 
-  // Always fill any remaining gaps with regex — even if AI parsed some items
+  // Always fill any remaining gaps with regex
   let regexCount = 0;
   profiles.forEach((p, i) => {
     if (!parsedTitles.has(i) && p.headline) {
@@ -292,88 +290,9 @@ async function runAIParsing(
       regexCount++;
     }
   });
-  if (regexCount > 0) {
-    if (aiUsed === "none") aiUsed = "Regex";
-    onEvent({ type: "step", message: `✅ Regex filled ${regexCount} remaining title(s)` });
-  }
+  if (regexCount > 0 && aiUsed === "none") aiUsed = "Regex";
 
   return aiUsed;
-}
-
-// ─── Email enrichment (API fallbacks, used when scraper email is empty) ───────
-// Apollo and Hunter are optional — they are used only when the Python scraper
-// couldn't find an email without them.
-// apolloDisabled is request-scoped (passed as { value } ref) to avoid shared state.
-
-async function tryApolloEmail(
-  linkedinUrl: string,
-  fullName: string,
-  company: string,
-  disabled: { value: boolean }
-): Promise<string | null> {
-  if (!process.env.APOLLO_API_KEY || disabled.value) return null;
-
-  // Strategy A: by LinkedIn URL
-  try {
-    const res = await fetchWithTimeout("https://api.apollo.io/v1/people/match", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-        "X-Api-Key": process.env.APOLLO_API_KEY!,
-      },
-      body: JSON.stringify({ linkedin_url: linkedinUrl }),
-    });
-    if (res.ok) return (await res.json()).person?.email || null;
-    if (res.status === 403) disabled.value = true; // Free-plan key — stop retrying
-  } catch { /* timeout */ }
-
-  // Strategy B: by name + company
-  if (fullName && company && !disabled.value) {
-    try {
-      const [first, ...rest] = fullName.split(" ");
-      const res = await fetchWithTimeout("https://api.apollo.io/v1/people/match", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-cache",
-          "X-Api-Key": process.env.APOLLO_API_KEY!,
-        },
-        body: JSON.stringify({ first_name: first, last_name: rest.join(" "), organization_name: company }),
-      });
-      if (res.ok) return (await res.json()).person?.email || null;
-    } catch { /* timeout */ }
-  }
-
-  return null;
-}
-
-async function tryHunterEmail(
-  fullName: string,
-  company: string
-): Promise<string | null> {
-  if (!process.env.HUNTER_API_KEY || !fullName || !company) return null;
-
-  try {
-    const cleanCo = company.split(/[|,-]/)[0]
-      .replace(/helping.*/i, "").replace(/scaling.*/i, "").replace(/[^\w\s]/g, "").trim()
-      || company.split(" ")[0];
-
-    const dsRes = await fetchWithTimeout(
-      `https://api.hunter.io/v2/domain-search?company=${encodeURIComponent(cleanCo)}&api_key=${process.env.HUNTER_API_KEY}`
-    );
-    if (!dsRes.ok) return null;
-    const domain = (await dsRes.json()).data?.domain || "";
-    if (!domain) return null;
-
-    const [first, ...rest] = fullName.split(" ");
-    const res = await fetchWithTimeout(
-      `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(first)}&last_name=${encodeURIComponent(rest.join(" "))}&api_key=${process.env.HUNTER_API_KEY}`
-    );
-    if (res.ok) return (await res.json()).data?.email || null;
-  } catch { /* timeout */ }
-
-  return null;
 }
 
 async function parallelLimit<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
@@ -398,16 +317,16 @@ export async function runPipeline(
   onEvent: (event: PipelineEvent) => void
 ): Promise<void> {
   const supabase = getSupabaseAdmin();
-  const apolloDisabled = { value: false }; // request-scoped — safe under concurrency
 
   // ── Env check ─────────────────────────────────────────────────────
   const missing: string[] = [];
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL) missing.push("NEXT_PUBLIC_SUPABASE_URL");
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  if (!process.env.SCRAPER_SERVICE_URL) missing.push("SCRAPER_SERVICE_URL");
+  if (!process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL) missing.push("NEXT_PUBLIC_SCRAPER_SERVICE_URL");
   if (!process.env.OPENAI_API_KEY && !process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY) {
     missing.push("at least one AI key: GROQ_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY");
   }
+  
   if (missing.length > 0) {
     onEvent({ type: "error", message: `Missing env vars: ${missing.join(", ")}` });
     return;
@@ -441,7 +360,7 @@ export async function runPipeline(
   } catch (err: any) {
     onEvent({
       type: "error",
-      message: `❌ Scraper failed: ${err?.message}. Check SCRAPER_SERVICE_URL, LINKEDIN_EMAIL, LINKEDIN_PASSWORD.`,
+      message: `❌ Scraper failed: ${err?.message}. Check NEXT_PUBLIC_SCRAPER_SERVICE_URL, LINKEDIN_EMAIL, LINKEDIN_PASSWORD.`,
     });
     return;
   }
@@ -454,8 +373,8 @@ export async function runPipeline(
   // Normalise reactor list → NormalizedProfile[]
   const normalized = normalizeProfiles(reactors, onEvent);
 
-  // ── Step 2: AI title/company parsing (gaps only) ───────────────────
-  onEvent({ type: "step", message: "🤖 Step 2/3 — AI parsing job titles & companies from headlines..." });
+  // ── Step 2: Extract job titles & companies from deep-dive data ─────
+  onEvent({ type: "step", message: "⚙️ Extracting job titles & companies from profile data..." });
 
   const parsedTitles = new Map<number, ParsedTitle>();
 
@@ -477,51 +396,40 @@ export async function runPipeline(
 
   const gaps = normalized.filter((_, i) => !parsedTitles.has(i));
   if (gaps.length > 0) {
-    onEvent({ type: "step", message: `⚙️ Running AI for ${gaps.length} unparsed headline(s)...` });
+    onEvent({ type: "step", message: `🤖 Step 2/3 — AI parsing unparsed titles with LLMs...` });
     const aiUsed = await runAIParsing(normalized, parsedTitles, onEvent);
-    onEvent({ type: "step", message: `📊 Titles parsed via: ${aiUsed}` });
+    onEvent({ type: "step", message: `📊 Titles resolved via: ${aiUsed}` });
   } else {
     onEvent({ type: "step", message: "✅ All titles resolved from profile deep-dive" });
   }
 
-  // ── Step 3: Email — scraper results first, then API fallbacks ─────
-  onEvent({ type: "step", message: `📧 Step 3/3 — Finalising emails for ${normalized.length} leads...` });
+  // ── Step 3: Finalise enriched leads ────────────────────────────────
+  onEvent({ type: "step", message: `📧 Finalising enriched data for ${normalized.length} leads...` });
 
-  const enrichedLeads = await parallelLimit(
-    normalized.map((profile, i) => async (): Promise<EnrichedLead> => {
-      const parsed = parsedTitles.get(i);
-      const cleanUrl = profile.linkedinUrl.split("?")[0].replace(/\/$/, "").toLowerCase();
+  const enrichedLeads: EnrichedLead[] = normalized.map((profile, i) => {
+    const parsed = parsedTitles.get(i);
+    const cleanUrl = profile.linkedinUrl.split("?")[0].replace(/\/$/, "").toLowerCase();
 
-      // Email already discovered by Python scraper?
-      let email: string | null = profile.email || null;
+    // Email already discovered by Python scraper?
+    let email: string | null = profile.email || null;
 
-      // Look up from profileMap if not on reactor
-      if (!email) {
-        profileMap.forEach((v, k) => {
-          if (!email && k.toLowerCase() === cleanUrl) email = v.email || null;
-        });
-      }
+    // Look up from profileMap if not on reactor
+    if (!email) {
+      profileMap.forEach((v, k) => {
+        if (!email && k.toLowerCase() === cleanUrl) email = v.email || null;
+      });
+    }
 
-      // Fallback: Apollo / Hunter (optional, free-tier limited)
-      if (!email) {
-        email = await tryApolloEmail(profile.linkedinUrl, profile.fullName, parsed?.company || "", apolloDisabled);
-      }
-      if (!email && parsed?.company) {
-        email = await tryHunterEmail(profile.fullName, parsed.company);
-      }
-
-      return {
-        full_name: profile.fullName || "Unknown",
-        linkedin_url: profile.linkedinUrl,
-        headline: profile.headline,
-        job_title: parsed?.jobTitle || profile.headline || "",
-        company: parsed?.company || "",
-        email,
-        status: "completed",
-      };
-    }),
-    8
-  );
+    return {
+      full_name: profile.fullName || "Unknown",
+      linkedin_url: profile.linkedinUrl,
+      headline: profile.headline,
+      job_title: parsed?.jobTitle || profile.headline || "",
+      company: parsed?.company || "",
+      email,
+      status: "completed",
+    };
+  });
 
   const emailCount   = enrichedLeads.filter((l) => l.email).length;
   const urlCount     = enrichedLeads.filter((l) => l.linkedin_url).length;
