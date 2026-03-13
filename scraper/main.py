@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="LinkedIn Scraper Service", version="2.0.0")
 
-_EMAIL    = os.environ.get("LINKEDIN_EMAIL", "")
-_PASSWORD = os.environ.get("LINKEDIN_PASSWORD", "")
+_EMAIL    = os.environ.get("NEXT_PUBLIC_LINKEDIN_EMAIL", "")
+_PASSWORD = os.environ.get("NEXT_PUBLIC_LINKEDIN_PASSWORD", "")
 
 
 # ── Request models ─────────────────────────────────────────────────────────────

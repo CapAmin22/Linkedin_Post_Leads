@@ -351,8 +351,8 @@ export const scrapeLinkedInPost = task({
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const linkedinEmail = process.env.LINKEDIN_EMAIL;
-    const linkedinPassword = process.env.LINKEDIN_PASSWORD;
+    const linkedinEmail = process.env.NEXT_PUBLIC_LINKEDIN_EMAIL;
+    const linkedinPassword = process.env.NEXT_PUBLIC_LINKEDIN_PASSWORD;
     if (!linkedinEmail || !linkedinPassword) {
       emit({
         type: "error",
