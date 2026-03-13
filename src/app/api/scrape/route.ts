@@ -1,13 +1,15 @@
 import { createClient } from "@/lib/supabase/server";
-import { runPipeline, type PipelineEvent } from "@/lib/pipeline";
+import { scrapeLinkedInPost } from "@/trigger/scrape";
+import { runs } from "@trigger.dev/sdk/v3";
+import type { PipelineEvent } from "@/lib/pipeline";
 
-// 300s = Vercel Pro max. Hobby plan is capped at 60s — deploy scraper
-// service locally or on Railway/Render so the heavy work happens there.
+// Vercel: hobby = 60s, pro = 300s.
+// Heavy work runs inside Trigger.dev (max 600s) — Vercel only polls.
 export const maxDuration = 300;
 
 export async function POST(request: Request) {
   try {
-    // Authenticate
+    // ── Auth ─────────────────────────────────────────────────────────
     const supabase = await createClient();
     const {
       data: { user },
@@ -21,9 +23,9 @@ export async function POST(request: Request) {
       );
     }
 
-    // Validate URL
+    // ── Validate input ────────────────────────────────────────────────
     const body = await request.json();
-    const { url } = body;
+    const { url } = body as { url?: string };
 
     if (!url || typeof url !== "string") {
       return new Response(
@@ -39,32 +41,110 @@ export async function POST(request: Request) {
       );
     }
 
-    // Stream pipeline events via SSE
+    // ── Check required env vars ───────────────────────────────────────
+    const missing: string[] = [];
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) missing.push("NEXT_PUBLIC_SUPABASE_URL");
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
+    if (!process.env.TRIGGER_SECRET_KEY) missing.push("TRIGGER_SECRET_KEY");
+    if (!process.env.LINKEDIN_EMAIL) missing.push("LINKEDIN_EMAIL");
+    if (!process.env.LINKEDIN_PASSWORD) missing.push("LINKEDIN_PASSWORD");
+    if (
+      !process.env.OPENAI_API_KEY &&
+      !process.env.GEMINI_API_KEY &&
+      !process.env.GROQ_API_KEY
+    ) {
+      missing.push("at least one LLM key: GROQ_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY");
+    }
+
+    if (missing.length > 0) {
+      return new Response(
+        JSON.stringify({ error: `Missing env vars: ${missing.join(", ")}` }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // ── Trigger background task ───────────────────────────────────────
+    const handle = await scrapeLinkedInPost.trigger({
+      url,
+      userId: user.id,
+      limit: 20,
+    });
+
+    // ── Stream progress via SSE ───────────────────────────────────────
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        const sendEvent = (event: PipelineEvent) => {
-          const data = JSON.stringify(event);
-          controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+        const send = (event: PipelineEvent) => {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
+          );
         };
 
-        // Add a heartbeat to keep the connection alive
+        send({ type: "step", message: "⏳ Task queued — starting scraper..." });
+
+        let lastEventCount = 0;
+        let stalePollCount = 0;
+        const MAX_POLLS = 600; // up to 10 minutes
+
+        // Heartbeat so the browser connection stays alive
         const heartbeat = setInterval(() => {
-          controller.enqueue(encoder.encode(`data: {"type":"step","message":"📡 Heartbeat: Processing..."}\n\n`));
-        }, 10000);
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ type: "step", message: "📡 Working..." })}\n\n`
+            )
+          );
+        }, 15000);
 
         try {
-          await runPipeline(url, user.id, sendEvent);
-        } catch (error: any) {
-          sendEvent({
-            type: "error",
-            message: `❌ Unexpected error: ${error?.message || "Unknown error"}`,
-          });
+          for (let poll = 0; poll < MAX_POLLS; poll++) {
+            await new Promise((r) => setTimeout(r, 1000));
+
+            let run: Awaited<ReturnType<typeof runs.retrieve>>;
+            try {
+              run = await runs.retrieve(handle.id);
+            } catch {
+              stalePollCount++;
+              if (stalePollCount >= 10) {
+                send({
+                  type: "error",
+                  message:
+                    "❌ Could not reach Trigger.dev. Is TRIGGER_SECRET_KEY correct? Run `npx trigger.dev@latest dev` locally.",
+                });
+                break;
+              }
+              continue;
+            }
+            stalePollCount = 0;
+
+            // Drain new events from task metadata
+            const allEvents =
+              ((run.metadata as Record<string, unknown>)?.events as PipelineEvent[]) || [];
+            if (allEvents.length > lastEventCount) {
+              allEvents.slice(lastEventCount).forEach(send);
+              lastEventCount = allEvents.length;
+            }
+
+            // Task finished?
+            if (
+              run.status === "COMPLETED" ||
+              run.status === "FAILED" ||
+              run.status === "CRASHED" ||
+              run.status === "CANCELED" ||
+              run.status === "SYSTEM_FAILURE"
+            ) {
+              if (run.status !== "COMPLETED") {
+                send({
+                  type: "error",
+                  message: `❌ Task ended with status: ${run.status}`,
+                });
+              }
+              break;
+            }
+          }
         } finally {
           clearInterval(heartbeat);
         }
 
-        // Signal end of stream
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       },
@@ -77,10 +157,13 @@ export async function POST(request: Request) {
         Connection: "keep-alive",
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Scrape API error:", error);
     return new Response(
-      JSON.stringify({ error: "Internal server error", details: error?.message }),
+      JSON.stringify({
+        error: "Internal server error",
+        details: (error as Error)?.message,
+      }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
