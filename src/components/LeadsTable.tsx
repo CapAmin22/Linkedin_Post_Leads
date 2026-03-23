@@ -134,21 +134,30 @@ export default function LeadsTable({ refreshKey }: { refreshKey: number }) {
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [page, setPage] = useState(1);
+  const [userId, setUserId] = useState<string | null>(null);
 
   const supabase = useMemo(() => createClient(), []);
 
-  // ── Fetch all user leads ──────────────────────────────────────────
+  // ── Resolve authenticated user ────────────────────────────────────
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id ?? null));
+  }, [supabase]);
+
+  // ── Fetch leads for the current user only ─────────────────────────
 
   const fetchLeads = useCallback(async () => {
+    if (!userId) return;
     setLoading(true);
     const { data, error } = await supabase
       .from("scraped_leads")
       .select("*")
+      .eq("user_id", userId)
       .order("created_at", { ascending: false });
 
     if (!error && data) setLeads(data as Lead[]);
     setLoading(false);
-  }, [supabase]);
+  }, [supabase, userId]);
 
   useEffect(() => {
     fetchLeads();

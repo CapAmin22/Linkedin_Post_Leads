@@ -16,13 +16,7 @@ export async function GET() {
     status: serviceRoleKey?.startsWith("eyJ") ? "✅ Valid JWT" : "❌ Invalid",
   };
 
-  // 2. Apify
-  const apifyToken = process.env.APIFY_API_TOKEN;
-  results.apify_token = {
-    status: apifyToken && apifyToken.length > 10 ? "✅ Set" : "❌ Missing",
-  };
-
-  // 3. Groq
+  // 2. Groq
   const groqKey = process.env.GROQ_API_KEY;
   results.groq_key = {
     status: groqKey && groqKey.startsWith("gsk_") ? "✅ Set" : "⚠️ Missing",
@@ -53,19 +47,7 @@ export async function GET() {
       : "❌ No AI key set!",
   };
 
-  // 5. Apollo
-  const apolloKey = process.env.APOLLO_API_KEY;
-  results.apollo_key = {
-    status: apolloKey && apolloKey.length > 5 ? "✅ Set" : "⚠️ Missing (optional)",
-  };
-
-  // 6. Hunter
-  const hunterKey = process.env.HUNTER_API_KEY;
-  results.hunter_key = {
-    status: hunterKey && hunterKey.length > 10 ? "✅ Set" : "⚠️ Missing (optional)",
-  };
-
-  // 7. Scraper Service
+  // 5. Scraper Service
   const scraperUrl = process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL;
   const linkedinEmail = process.env.LINKEDIN_EMAIL;
   const linkedinPassword = process.env.LINKEDIN_PASSWORD;
@@ -111,23 +93,6 @@ export async function GET() {
       };
     } catch (error: any) {
       results.supabase_connection = {
-        status: "❌ Connection failed",
-        detail: error?.message,
-      };
-    }
-  }
-
-  // 10. Quick Apify test (Legacy/Optional)
-  if (apifyToken) {
-    try {
-      const res = await fetch("https://api.apify.com/v2/acts?limit=1", {
-        headers: { Authorization: `Bearer ${apifyToken}` },
-      });
-      results.apify_connection = {
-        status: res.ok ? "✅ Connected" : `❌ HTTP ${res.status}`,
-      };
-    } catch (error: any) {
-      results.apify_connection = {
         status: "❌ Connection failed",
         detail: error?.message,
       };
