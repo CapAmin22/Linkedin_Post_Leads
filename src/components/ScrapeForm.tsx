@@ -83,14 +83,23 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
             try {
               const event: PipelineEvent = JSON.parse(payload);
               
-              // Handle heartbeats: only keep the newest one to avoid clutter
-              if (event.message.includes("Heartbeat")) {
-                  setSteps((prev) => {
-                      const filtered = prev.filter(s => !s.message.includes("Heartbeat"));
-                      return [...filtered, event];
-                  });
+              // Collapse heartbeat / working messages to a single line
+              const isHeartbeat =
+                event.message.includes("Heartbeat") ||
+                event.message.includes("Working...") ||
+                event.message.includes("📡");
+              if (isHeartbeat) {
+                setSteps((prev) => {
+                  const rest = prev.filter(
+                    (s) =>
+                      !s.message.includes("Heartbeat") &&
+                      !s.message.includes("Working...") &&
+                      !s.message.includes("📡")
+                  );
+                  return [...rest, event];
+                });
               } else {
-                  setSteps((prev) => [...prev, event]);
+                setSteps((prev) => [...prev, event]);
               }
 
               if (event.type === "error") {

@@ -6,13 +6,11 @@ import ScrapeForm from "@/components/ScrapeForm";
 import LeadsTable from "@/components/LeadsTable";
 
 export default function DashboardPage() {
-  // Track the current URL being viewed/scraped
-  const [activeUrl, setActiveUrl] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const handleComplete = useCallback((leadsProcessed: number, url: string) => {
+  // Called when a scrape completes — increment refreshKey to re-fetch leads
+  const handleComplete = useCallback((leadsProcessed: number, _url: string) => {
     if (leadsProcessed > 0) {
-      setActiveUrl(url);
       setRefreshKey((k) => k + 1);
     }
   }, []);
@@ -29,13 +27,11 @@ export default function DashboardPage() {
           </p>
         </div>
 
-        {/* Scrape form */}
+        {/* Scrape form — always visible */}
         <ScrapeForm onComplete={handleComplete} />
 
-        {/* Leads table - Only show if we have an active URL */}
-        {activeUrl && (
-          <LeadsTable refreshKey={refreshKey} sourceUrl={activeUrl} />
-        )}
+        {/* Leads table — always visible, shows all user leads */}
+        <LeadsTable refreshKey={refreshKey} />
       </main>
     </div>
   );

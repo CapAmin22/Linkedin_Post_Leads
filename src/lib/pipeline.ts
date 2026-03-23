@@ -1,3 +1,5 @@
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+
 // ─── Types ────────────────────────────────────────────────────────────
 
 export interface NormalizedProfile {
@@ -30,7 +32,16 @@ export interface PipelineEvent {
   data?: Record<string, unknown>;
 }
 
-// ─── HTTP Helpers ────────────────────────────────────────────────────
+// ─── Supabase Admin ───────────────────────────────────────────────────
+
+function getSupabaseAdmin() {
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+}
+
+// ─── HTTP Helpers ─────────────────────────────────────────────────────
 
 export async function fetchWithTimeout(
   url: string,
@@ -69,6 +80,34 @@ export async function retryFetch(
     }
   }
   throw lastError;
+}
+
+// ─── Scraper Service ──────────────────────────────────────────────────
+
+function scraperBase(): string {
+  return (process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL || "").replace(/\/$/, "");
+}
+
+async function callScraper(
+  endpoint: string,
+  body: Record<string, unknown>,
+  timeoutMs: number
+): Promise<unknown> {
+  const url = `${scraperBase()}${endpoint}`;
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    timeoutMs
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(err.detail || `Scraper ${endpoint} → ${res.status}`);
+  }
+  return res.json();
 }
 
 // ─── Profile Normalizer ───────────────────────────────────────────────
@@ -110,7 +149,7 @@ export function normalizeProfiles(
 
 // ─── Regex Fallback Parser ────────────────────────────────────────────
 
-export function fallbackRegexParse(headline: string): ParsedTitle {
+function fallbackRegexParse(headline: string): ParsedTitle {
   const atMatch = headline.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
   if (atMatch) return { jobTitle: atMatch[1].trim(), company: atMatch[2].trim() };
   const pipeMatch = headline.match(/^(.+?)\s*\|\s*(.+)$/);
@@ -124,7 +163,7 @@ export function fallbackRegexParse(headline: string): ParsedTitle {
 
 // ─── AI Parsing: Groq → Gemini → OpenAI → Regex ──────────────────────
 
-export function buildPrompt(headlines: string): string {
+function buildPrompt(headlines: string): string {
   return `Extract "Job Title" and "Company Name" from LinkedIn headlines.
 Return JSON: {"results": [{"index": N, "jobTitle": "...", "company": "..."}]}
 
@@ -138,22 +177,25 @@ Headlines:
 ${headlines}`;
 }
 
-export function extractParsedArray(
+function extractParsedArray(
   text: string
 ): { index: number; jobTitle: string; company: string }[] {
   const jsonStr = text
     .replace(/```json\n?/g, "")
     .replace(/```\n?/g, "")
     .trim();
-  const raw = JSON.parse(jsonStr);
-  if (Array.isArray(raw)) return raw;
-  for (const key of Object.keys(raw)) {
-    if (Array.isArray(raw[key])) return raw[key];
+  const raw = JSON.parse(jsonStr) as unknown;
+  if (Array.isArray(raw)) return raw as { index: number; jobTitle: string; company: string }[];
+  if (raw && typeof raw === "object") {
+    for (const key of Object.keys(raw as object)) {
+      const val = (raw as Record<string, unknown>)[key];
+      if (Array.isArray(val)) return val as { index: number; jobTitle: string; company: string }[];
+    }
   }
   return [];
 }
 
-export async function parseWithGroq(prompt: string): Promise<string> {
+async function parseWithGroq(prompt: string): Promise<string> {
   const res = await retryFetch(
     "https://api.groq.com/openai/v1/chat/completions",
     {
@@ -172,13 +214,17 @@ export async function parseWithGroq(prompt: string): Promise<string> {
     0
   );
   if (!res.ok) {
-    const e = await res.json().catch(() => ({})) as { error?: { message?: string } };
+    const e = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
     throw new Error(`Groq ${res.status}: ${e.error?.message || "error"}`);
   }
-  return ((await res.json()) as { choices: { message: { content: string } }[] }).choices[0].message.content;
+  return (
+    (await res.json()) as {
+      choices: { message: { content: string } }[];
+    }
+  ).choices[0].message.content;
 }
 
-export async function parseWithGemini(prompt: string): Promise<string> {
+async function parseWithGemini(prompt: string): Promise<string> {
   const res = await retryFetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
     {
@@ -186,19 +232,26 @@ export async function parseWithGemini(prompt: string): Promise<string> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, responseMimeType: "application/json" },
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: "application/json",
+        },
       }),
     },
     0
   );
   if (!res.ok) {
-    const e = await res.json().catch(() => ({})) as { error?: { message?: string } };
+    const e = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
     throw new Error(`Gemini ${res.status}: ${e.error?.message || "error"}`);
   }
-  return ((await res.json()) as { candidates: { content: { parts: { text: string }[] } }[] }).candidates[0].content.parts[0].text;
+  return (
+    (await res.json()) as {
+      candidates: { content: { parts: { text: string }[] } }[];
+    }
+  ).candidates[0].content.parts[0].text;
 }
 
-export async function parseWithOpenAI(prompt: string): Promise<string> {
+async function parseWithOpenAI(prompt: string): Promise<string> {
   const res = await retryFetch(
     "https://api.openai.com/v1/chat/completions",
     {
@@ -216,7 +269,11 @@ export async function parseWithOpenAI(prompt: string): Promise<string> {
     }
   );
   if (!res.ok) throw new Error(`OpenAI ${res.status}`);
-  return ((await res.json()) as { choices: { message: { content: string } }[] }).choices[0].message.content;
+  return (
+    (await res.json()) as {
+      choices: { message: { content: string } }[];
+    }
+  ).choices[0].message.content;
 }
 
 export async function runAIParsing(
@@ -224,7 +281,9 @@ export async function runAIParsing(
   parsedTitles: Map<number, ParsedTitle>,
   onEvent: (event: PipelineEvent) => void
 ): Promise<string> {
-  const headlines = profiles.map((p, i) => `${i}. "${p.headline || "N/A"}"`).join("\n");
+  const headlines = profiles
+    .map((p, i) => `${i}. "${p.headline || "N/A"}"`)
+    .join("\n");
   const prompt = buildPrompt(headlines);
   let aiUsed = "none";
 
@@ -291,7 +350,7 @@ export async function runAIParsing(
     }
   }
 
-  // Always fill remaining gaps with regex
+  // Fill any remaining gaps with regex
   let regexCount = 0;
   profiles.forEach((p, i) => {
     if (!parsedTitles.has(i) && p.headline) {
@@ -304,164 +363,7 @@ export async function runAIParsing(
   return aiUsed;
 }
 
-// ─── Supabase Admin ──────────────────────────────────────────────────
-
-function getSupabaseAdmin() {
-  const { createClient } = require("@supabase/supabase-js");
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
-}
-
-// ─── Scraper Service ──────────────────────────────────────────────────
-
-export function scraperBase(): string {
-  return (process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL || "").replace(/\/$/, "");
-}
-
-export async function callScraper(
-  endpoint: string,
-  body: Record<string, unknown>,
-  timeoutMs: number
-): Promise<any> {
-  const url = `${scraperBase()}${endpoint}`;
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    timeoutMs
-  );
-  if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as { detail?: string };
-    throw new Error(err.detail || `Scraper ${endpoint} → ${res.status}`);
-  }
-  return res.json();
-}
-
-// ─── Email enrichment (optional fallbacks — skip if exhausted) ─────────
-
-export async function tryApolloEmail(
-  linkedinUrl: string,
-  fullName: string,
-  company: string,
-  disabled: { value: boolean }
-): Promise<string | null> {
-  if (!process.env.APOLLO_API_KEY || disabled.value) return null;
-
-  try {
-    const res = await fetchWithTimeout("https://api.apollo.io/v1/people/match", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-        "X-Api-Key": process.env.APOLLO_API_KEY!,
-      },
-      body: JSON.stringify({ linkedin_url: linkedinUrl }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { person?: { email?: string } };
-      return data.person?.email || null;
-    }
-    if (res.status === 403) disabled.value = true;
-  } catch {
-    /* timeout */
-  }
-
-  if (fullName && company && !disabled.value) {
-    try {
-      const [first, ...rest] = fullName.split(" ");
-      const res = await fetchWithTimeout("https://api.apollo.io/v1/people/match", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-cache",
-          "X-Api-Key": process.env.APOLLO_API_KEY!,
-        },
-        body: JSON.stringify({
-          first_name: first,
-          last_name: rest.join(" "),
-          organization_name: company,
-        }),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { person?: { email?: string } };
-        return data.person?.email || null;
-      }
-    } catch {
-      /* timeout */
-    }
-  }
-
-  return null;
-}
-
-export async function tryHunterEmail(
-  fullName: string,
-  company: string
-): Promise<string | null> {
-  if (!process.env.HUNTER_API_KEY || !fullName || !company) return null;
-
-  try {
-    const cleanCo =
-      company
-        .split(/[|,-]/)[0]
-        .replace(/helping.*/i, "")
-        .replace(/scaling.*/i, "")
-        .replace(/[^\w\s]/g, "")
-        .trim() || company.split(" ")[0];
-
-    const dsRes = await fetchWithTimeout(
-      `https://api.hunter.io/v2/domain-search?company=${encodeURIComponent(
-        cleanCo
-      )}&api_key=${process.env.HUNTER_API_KEY}`
-    );
-    if (!dsRes.ok) return null;
-    const dsData = (await dsRes.json()) as { data?: { domain?: string } };
-    const domain = dsData.data?.domain || "";
-    if (!domain) return null;
-
-    const [first, ...rest] = fullName.split(" ");
-    const res = await fetchWithTimeout(
-      `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(
-        domain
-      )}&first_name=${encodeURIComponent(first)}&last_name=${encodeURIComponent(
-        rest.join(" ")
-      )}&api_key=${process.env.HUNTER_API_KEY}`
-    );
-    if (res.ok) {
-      const data = (await res.json()) as { data?: { email?: string } };
-      return data.data?.email || null;
-    }
-  } catch {
-    /* timeout */
-  }
-
-  return null;
-}
-
-export async function parallelLimit<T>(
-  tasks: (() => Promise<T>)[],
-  concurrency: number
-): Promise<T[]> {
-  const results: T[] = new Array(tasks.length);
-  const queue: number[] = tasks.map((_, i) => i);
-  async function worker() {
-    let idx: number | undefined;
-    while ((idx = queue.shift()) !== undefined) {
-      results[idx] = await tasks[idx]();
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, tasks.length) }, worker)
-  );
-  return results;
-}
-
-// ─── Main Pipeline ────────────────────────────────────────────────────
+// ─── Main Pipeline ─────────────────────────────────────────────────────
 
 export async function runPipeline(
   postUrl: string,
@@ -470,15 +372,32 @@ export async function runPipeline(
 ): Promise<void> {
   const supabase = getSupabaseAdmin();
 
-  // ── Env check ─────────────────────────────────────────────────────
+  // ── Env check ──────────────────────────────────────────────────────
   const missing: string[] = [];
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) missing.push("NEXT_PUBLIC_SUPABASE_URL");
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  if (!process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL) missing.push("NEXT_PUBLIC_SCRAPER_SERVICE_URL");
-  if (!process.env.NEXT_PUBLIC_LINKEDIN_EMAIL && !process.env.LINKEDIN_EMAIL) missing.push("LINKEDIN_EMAIL");
-  if (!process.env.NEXT_PUBLIC_LINKEDIN_PASSWORD && !process.env.LINKEDIN_PASSWORD) missing.push("LINKEDIN_PASSWORD");
-  if (!process.env.OPENAI_API_KEY && !process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY) {
-    missing.push("at least one AI key: GROQ_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY");
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL)
+    missing.push("NEXT_PUBLIC_SUPABASE_URL");
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY)
+    missing.push("SUPABASE_SERVICE_ROLE_KEY");
+  if (!process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL)
+    missing.push("NEXT_PUBLIC_SCRAPER_SERVICE_URL");
+  if (
+    !process.env.NEXT_PUBLIC_LINKEDIN_EMAIL &&
+    !process.env.LINKEDIN_EMAIL
+  )
+    missing.push("LINKEDIN_EMAIL");
+  if (
+    !process.env.NEXT_PUBLIC_LINKEDIN_PASSWORD &&
+    !process.env.LINKEDIN_PASSWORD
+  )
+    missing.push("LINKEDIN_PASSWORD");
+  if (
+    !process.env.OPENAI_API_KEY &&
+    !process.env.GEMINI_API_KEY &&
+    !process.env.GROQ_API_KEY
+  ) {
+    missing.push(
+      "at least one AI key: GROQ_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY"
+    );
   }
 
   if (missing.length > 0) {
@@ -489,7 +408,7 @@ export async function runPipeline(
     return;
   }
 
-  // ── Step 1+2: Scrape + Deep Dive via Python service ────────────────
+  // ── Step 1: Scrape reactions + profiles via Python service ─────────
   onEvent({
     type: "step",
     message: "🔍 Step 1/3 — Launching Selenium + Scrapy scraper...",
@@ -501,20 +420,27 @@ export async function runPipeline(
   }
 
   let reactors: Record<string, unknown>[] = [];
-  let profileMap = new Map<string, Record<string, unknown>>();
+  const profileMap = new Map<string, Record<string, unknown>>();
 
   try {
     const result = (await callScraper(
       "/scrape/full",
-      { post_url: postUrl, limit: 20, scrape_profiles: true, scrape_emails: true },
-      240000
+      {
+        post_url: postUrl,
+        limit: 20,
+        scrape_profiles: true,
+        scrape_emails: true,
+      },
+      240000 // 4 min — covers reactions + profiles + email discovery
     )) as ScraperResult;
 
     reactors = result.reactors ?? [];
     const profiles = result.profiles ?? [];
 
     profiles.forEach((p) => {
-      const key = ((p.linkedinUrl as string) || "").split("?")[0].replace(/\/$/, "");
+      const key = ((p.linkedinUrl as string) || "")
+        .split("?")[0]
+        .replace(/\/$/, "");
       profileMap.set(key, p);
     });
 
@@ -525,7 +451,7 @@ export async function runPipeline(
   } catch (err: unknown) {
     onEvent({
       type: "error",
-      message: `❌ Scraper failed: ${(err as Error)?.message}. Check NEXT_PUBLIC_SCRAPER_SERVICE_URL, LINKEDIN_EMAIL, LINKEDIN_PASSWORD.`,
+      message: `❌ Scraper failed: ${(err as Error)?.message}. Is the Python service running at ${scraperBase()}?`,
     });
     return;
   }
@@ -539,9 +465,9 @@ export async function runPipeline(
     return;
   }
 
+  // ── Step 2: Normalise & pre-fill from deep-dive data ──────────────
   const normalized = normalizeProfiles(reactors, onEvent);
 
-  // ── Step 3: Parse titles & companies ───────────────────────────────
   onEvent({
     type: "step",
     message: "⚙️ Extracting job titles & companies from profile data...",
@@ -550,10 +476,16 @@ export async function runPipeline(
   const parsedTitles = new Map<number, ParsedTitle>();
 
   normalized.forEach((p, i) => {
-    const cleanUrl = p.linkedinUrl.split("?")[0].replace(/\/$/, "").toLowerCase();
+    const cleanUrl = p.linkedinUrl
+      .split("?")[0]
+      .replace(/\/$/, "")
+      .toLowerCase();
     let matched: Record<string, unknown> | undefined;
     profileMap.forEach((v, k) => {
-      if (k.toLowerCase() === cleanUrl || cleanUrl.includes(k.toLowerCase()))
+      if (
+        k.toLowerCase() === cleanUrl ||
+        cleanUrl.includes(k.toLowerCase())
+      )
         matched = v;
     });
     if (matched && (matched.jobTitle || matched.company)) {
@@ -565,11 +497,12 @@ export async function runPipeline(
     }
   });
 
+  // ── Step 3: LLM waterfall for remaining gaps ───────────────────────
   const gaps = normalized.filter((_, i) => !parsedTitles.has(i));
   if (gaps.length > 0) {
     onEvent({
       type: "step",
-      message: `🤖 Step 2/3 — AI parsing unparsed titles with LLMs...`,
+      message: `🤖 Step 2/3 — AI parsing ${gaps.length} headline(s)...`,
     });
     const aiUsed = await runAIParsing(normalized, parsedTitles, onEvent);
     onEvent({ type: "step", message: `📊 Titles resolved via: ${aiUsed}` });
@@ -580,18 +513,18 @@ export async function runPipeline(
     });
   }
 
-  // ── Step 4: Finalise enriched leads ────────────────────────────────
+  // ── Step 4: Finalise enriched leads ───────────────────────────────
   onEvent({
     type: "step",
-    message: `📧 Finalising enriched data for ${normalized.length} leads...`,
+    message: `📧 Finalising ${normalized.length} leads...`,
   });
 
-  const enrichedLeads: EnrichedLead[] = normalized.map((profile) => {
-    const cleanUrl = profile.linkedinUrl.split("?")[0].replace(/\/$/, "").toLowerCase();
-
-    // Re-lookup parsed data (in case AI updated it)
-    const idx = normalized.indexOf(profile);
-    const parsed = parsedTitles.get(idx);
+  const enrichedLeads: EnrichedLead[] = normalized.map((profile, i) => {
+    const parsed = parsedTitles.get(i);
+    const cleanUrl = profile.linkedinUrl
+      .split("?")[0]
+      .replace(/\/$/, "")
+      .toLowerCase();
 
     let email: string | null = profile.email || null;
     if (!email) {
@@ -615,7 +548,12 @@ export async function runPipeline(
   const emailCount = enrichedLeads.filter((l) => l.email).length;
   const companyCount = enrichedLeads.filter((l) => l.company).length;
 
-  // ── Step 5: Save to Supabase ──────────────────────────────────────
+  onEvent({
+    type: "step",
+    message: `✅ ${enrichedLeads.length} leads ready — ${emailCount} emails · ${companyCount} companies`,
+  });
+
+  // ── Step 5: Save to Supabase ───────────────────────────────────────
   onEvent({ type: "step", message: "💾 Saving to database..." });
 
   const { error } = await supabase.from("scraped_leads").insert(
@@ -638,6 +576,9 @@ export async function runPipeline(
   onEvent({
     type: "done",
     message: `🎉 Done! ${enrichedLeads.length} leads saved · ${emailCount} emails · ${companyCount} companies`,
-    data: { leadsProcessed: enrichedLeads.length, emailsFound: emailCount },
+    data: {
+      leadsProcessed: enrichedLeads.length,
+      emailsFound: emailCount,
+    },
   });
 }
