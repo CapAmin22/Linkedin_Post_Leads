@@ -11,7 +11,6 @@ export interface ParsedTitle {
   jobTitle: string;
   company: string;
   companyUrl?: string;
-  companyDomain?: string;
 }
 
 export interface EnrichedLead {
@@ -20,6 +19,8 @@ export interface EnrichedLead {
   headline: string;
   job_title: string;
   company: string;
+  company_linkedin_url: string | null;
+  location: string | null;
   email: string | null;
   status: string;
 }
@@ -80,7 +81,7 @@ export function normalizeProfiles(
   if (rawItems.length > 0) {
     onEvent({
       type: "step",
-      message: `📋 Data shape: [${Object.keys(rawItems[0]).join(", ")}]`,
+      message: `Data shape: [${Object.keys(rawItems[0]).join(", ")}]`,
     });
   }
 
@@ -112,17 +113,21 @@ export function normalizeProfiles(
 
 export function fallbackRegexParse(headline: string): ParsedTitle {
   const atMatch = headline.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
-  if (atMatch) return { jobTitle: atMatch[1].trim(), company: atMatch[2].trim() };
+  if (atMatch)
+    return { jobTitle: atMatch[1].trim(), company: atMatch[2].trim() };
   const pipeMatch = headline.match(/^(.+?)\s*\|\s*(.+)$/);
-  if (pipeMatch) return { jobTitle: pipeMatch[1].trim(), company: pipeMatch[2].trim() };
+  if (pipeMatch)
+    return { jobTitle: pipeMatch[1].trim(), company: pipeMatch[2].trim() };
   const dashMatch = headline.match(/^(.+?)\s+-\s+(.+)$/);
-  if (dashMatch) return { jobTitle: dashMatch[1].trim(), company: dashMatch[2].trim() };
+  if (dashMatch)
+    return { jobTitle: dashMatch[1].trim(), company: dashMatch[2].trim() };
   const commaMatch = headline.match(/^(.+?),\s+(.+)$/);
-  if (commaMatch) return { jobTitle: commaMatch[1].trim(), company: commaMatch[2].trim() };
+  if (commaMatch)
+    return { jobTitle: commaMatch[1].trim(), company: commaMatch[2].trim() };
   return { jobTitle: headline, company: "" };
 }
 
-// ─── AI Parsing: Groq → Gemini → OpenAI → Regex ──────────────────────
+// ─── AI Parsing: Groq → Gemini → Regex (free-tier only) ─────────────
 
 export function buildPrompt(headlines: string): string {
   return `Extract "Job Title" and "Company Name" from LinkedIn headlines.
@@ -172,10 +177,16 @@ export async function parseWithGroq(prompt: string): Promise<string> {
     0
   );
   if (!res.ok) {
-    const e = await res.json().catch(() => ({})) as { error?: { message?: string } };
+    const e = (await res.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
     throw new Error(`Groq ${res.status}: ${e.error?.message || "error"}`);
   }
-  return ((await res.json()) as { choices: { message: { content: string } }[] }).choices[0].message.content;
+  return (
+    (await res.json()) as {
+      choices: { message: { content: string } }[];
+    }
+  ).choices[0].message.content;
 }
 
 export async function parseWithGemini(prompt: string): Promise<string> {
@@ -186,37 +197,25 @@ export async function parseWithGemini(prompt: string): Promise<string> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, responseMimeType: "application/json" },
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: "application/json",
+        },
       }),
     },
     0
   );
   if (!res.ok) {
-    const e = await res.json().catch(() => ({})) as { error?: { message?: string } };
+    const e = (await res.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
     throw new Error(`Gemini ${res.status}: ${e.error?.message || "error"}`);
   }
-  return ((await res.json()) as { candidates: { content: { parts: { text: string }[] } }[] }).candidates[0].content.parts[0].text;
-}
-
-export async function parseWithOpenAI(prompt: string): Promise<string> {
-  const res = await retryFetch(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" },
-        temperature: 0,
-      }),
+  return (
+    (await res.json()) as {
+      candidates: { content: { parts: { text: string }[] } }[];
     }
-  );
-  if (!res.ok) throw new Error(`OpenAI ${res.status}`);
-  return ((await res.json()) as { choices: { message: { content: string } }[] }).choices[0].message.content;
+  ).candidates[0].content.parts[0].text;
 }
 
 export async function runAIParsing(
@@ -224,7 +223,9 @@ export async function runAIParsing(
   parsedTitles: Map<number, ParsedTitle>,
   onEvent: (event: PipelineEvent) => void
 ): Promise<string> {
-  const headlines = profiles.map((p, i) => `${i}. "${p.headline || "N/A"}"`).join("\n");
+  const headlines = profiles
+    .map((p, i) => `${i}. "${p.headline || "N/A"}"`)
+    .join("\n");
   const prompt = buildPrompt(headlines);
   let aiUsed = "none";
 
@@ -247,12 +248,12 @@ export async function runAIParsing(
       aiUsed = "Groq";
       onEvent({
         type: "step",
-        message: `✅ Groq parsed ${parsedTitles.size} titles`,
+        message: `Groq parsed ${parsedTitles.size} titles`,
       });
     } catch (err: unknown) {
       onEvent({
         type: "step",
-        message: `⚠️ Groq: ${(err as Error)?.message} — trying Gemini...`,
+        message: `Groq failed: ${(err as Error)?.message} — trying Gemini...`,
       });
     }
   }
@@ -263,35 +264,19 @@ export async function runAIParsing(
       aiUsed = "Gemini";
       onEvent({
         type: "step",
-        message: `✅ Gemini parsed ${parsedTitles.size} titles`,
+        message: `Gemini parsed ${parsedTitles.size} titles`,
       });
     } catch (err: unknown) {
       const msg = (err as Error)?.message || "";
       const q = msg.includes("429") || msg.includes("quota");
       onEvent({
         type: "step",
-        message: `⚠️ Gemini: ${q ? "quota exceeded" : msg} — trying OpenAI...`,
+        message: `Gemini failed: ${q ? "quota exceeded" : msg} — using regex fallback...`,
       });
     }
   }
 
-  if (parsedTitles.size < profiles.length && process.env.OPENAI_API_KEY) {
-    try {
-      applyResults(extractParsedArray(await parseWithOpenAI(prompt)));
-      aiUsed = "OpenAI";
-      onEvent({
-        type: "step",
-        message: `✅ OpenAI parsed ${parsedTitles.size} titles`,
-      });
-    } catch (err: unknown) {
-      onEvent({
-        type: "step",
-        message: `⚠️ OpenAI: ${(err as Error)?.message} — using regex fallback...`,
-      });
-    }
-  }
-
-  // Always fill remaining gaps with regex
+  // Fill remaining gaps with regex
   let regexCount = 0;
   profiles.forEach((p, i) => {
     if (!parsedTitles.has(i) && p.headline) {

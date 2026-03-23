@@ -27,6 +27,8 @@ interface Lead {
   headline: string | null;
   job_title: string | null;
   company: string | null;
+  company_linkedin_url: string | null;
+  location: string | null;
   email: string | null;
   status: string;
   source_url: string;
@@ -38,7 +40,10 @@ interface LeadsTableProps {
   sourceUrl: string;
 }
 
-export default function LeadsTable({ refreshKey, sourceUrl }: LeadsTableProps) {
+export default function LeadsTable({
+  refreshKey,
+  sourceUrl,
+}: LeadsTableProps) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const supabase = useMemo(() => createClient(), []);
@@ -57,30 +62,46 @@ export default function LeadsTable({ refreshKey, sourceUrl }: LeadsTableProps) {
     setLoading(false);
   }, [supabase, sourceUrl]);
 
-  // Fetch on mount and whenever refreshKey changes
   useEffect(() => {
     fetchLeads();
   }, [fetchLeads, refreshKey]);
 
   const exportToCsv = () => {
     if (leads.length === 0) return;
-    
-    const headers = ["Name", "LinkedIn URL", "Headline", "AI Job Title", "AI Company", "Email", "Status"];
-    const csvRows = leads.map(lead => [
-      `"${(lead.full_name || "").replace(/"/g, '""')}"`,
-      `"${(lead.linkedin_url || "").replace(/"/g, '""')}"`,
-      `"${(lead.headline || "").replace(/"/g, '""')}"`,
-      `"${(lead.job_title || "").replace(/"/g, '""')}"`,
-      `"${(lead.company || "").replace(/"/g, '""')}"`,
-      `"${(lead.email || "").replace(/"/g, '""')}"`,
-      `"${lead.status}"`
-    ].join(","));
-    
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...csvRows].join("\n");
+
+    const headers = [
+      "Name",
+      "Job Title",
+      "LinkedIn URL",
+      "Company",
+      "Company LinkedIn URL",
+      "Location",
+      "Email",
+      "Status",
+    ];
+    const csvRows = leads.map((lead) =>
+      [
+        `"${(lead.full_name || "").replace(/"/g, '""')}"`,
+        `"${(lead.job_title || "").replace(/"/g, '""')}"`,
+        `"${(lead.linkedin_url || "").replace(/"/g, '""')}"`,
+        `"${(lead.company || "").replace(/"/g, '""')}"`,
+        `"${(lead.company_linkedin_url || "").replace(/"/g, '""')}"`,
+        `"${(lead.location || "").replace(/"/g, '""')}"`,
+        `"${(lead.email || "").replace(/"/g, '""')}"`,
+        `"${lead.status}"`,
+      ].join(",")
+    );
+
+    const csvContent =
+      "data:text/csv;charset=utf-8," +
+      [headers.join(","), ...csvRows].join("\n");
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `leads_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute(
+      "download",
+      `leads_export_${new Date().toISOString().split("T")[0]}.csv`
+    );
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -89,9 +110,20 @@ export default function LeadsTable({ refreshKey, sourceUrl }: LeadsTableProps) {
   const statusBadge = (status: string) => {
     switch (status) {
       case "completed":
-        return <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20">Enriched</Badge>;
+        return (
+          <Badge
+            variant="secondary"
+            className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+          >
+            Done
+          </Badge>
+        );
       case "processing":
-        return <Badge variant="default" className="animate-pulse">Processing</Badge>;
+        return (
+          <Badge variant="default" className="animate-pulse">
+            Processing
+          </Badge>
+        );
       case "failed":
         return <Badge variant="destructive">Failed</Badge>;
       default:
@@ -120,22 +152,33 @@ export default function LeadsTable({ refreshKey, sourceUrl }: LeadsTableProps) {
                 <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
                 <path d="M16 3.13a4 4 0 0 1 0 7.75" />
               </svg>
-              Extracted Leads
+              Post Reactors
             </CardTitle>
             <CardDescription>
               {leads.length === 0
-                ? "No leads yet — paste a LinkedIn URL above to get started."
-                : `${leads.length} lead${leads.length !== 1 ? "s" : ""} found`}
+                ? "No leads yet — paste a LinkedIn post URL above to get started."
+                : `${leads.length} reactor${leads.length !== 1 ? "s" : ""} extracted`}
             </CardDescription>
           </div>
           {leads.length > 0 && (
-            <Button 
-              variant="outline" 
-              size="sm" 
+            <Button
+              variant="outline"
+              size="sm"
               onClick={exportToCsv}
-              className="hidden sm:flex"
+              className="hidden sm:flex gap-2 cursor-pointer"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2 h-4 w-4">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="h-4 w-4"
+              >
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                 <polyline points="7 10 12 15 17 10"></polyline>
                 <line x1="12" y1="15" x2="12" y2="3"></line>
@@ -148,9 +191,24 @@ export default function LeadsTable({ refreshKey, sourceUrl }: LeadsTableProps) {
       <CardContent>
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <svg className="animate-spin h-8 w-8 text-muted-foreground" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            <svg
+              className="animate-spin h-8 w-8 text-muted-foreground"
+              viewBox="0 0 24 24"
+            >
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+                fill="none"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+              />
             </svg>
           </div>
         ) : leads.length === 0 ? (
@@ -171,28 +229,42 @@ export default function LeadsTable({ refreshKey, sourceUrl }: LeadsTableProps) {
               </svg>
             </div>
             <p className="text-sm text-muted-foreground">
-              Your enriched leads will appear here
+              Your extracted leads will appear here
             </p>
           </div>
         ) : (
-          <div className="rounded-lg border border-border/50 overflow-hidden">
+          <div className="rounded-lg border border-border/50 overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="font-semibold">Name</TableHead>
+                  <TableHead className="font-semibold text-primary/80">
+                    Title
+                  </TableHead>
                   <TableHead className="font-semibold">LinkedIn</TableHead>
-                  <TableHead className="font-semibold">Raw Headline</TableHead>
-                  <TableHead className="font-semibold text-primary/80">Refined Job Title</TableHead>
-                  <TableHead className="font-semibold text-primary/80">Refined Company</TableHead>
-                  <TableHead className="font-semibold">Email</TableHead>
-                  <TableHead className="font-semibold text-center">Status</TableHead>
+                  <TableHead className="font-semibold text-primary/80">
+                    Company
+                  </TableHead>
+                  <TableHead className="font-semibold">
+                    Company LinkedIn
+                  </TableHead>
+                  <TableHead className="font-semibold">Location</TableHead>
+                  <TableHead className="font-semibold text-center">
+                    Status
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {leads.map((lead) => (
                   <TableRow key={lead.id} className="transition-colors">
-                    <TableCell className="font-medium">
-                      {lead.full_name || "—"}
+                    <TableCell className="font-medium whitespace-nowrap">
+                      {lead.full_name || "\u2014"}
+                    </TableCell>
+                    <TableCell
+                      className="font-medium text-foreground max-w-[180px] truncate"
+                      title={lead.job_title || undefined}
+                    >
+                      {lead.job_title || "\u2014"}
                     </TableCell>
                     <TableCell>
                       {lead.linkedin_url ? (
@@ -203,41 +275,92 @@ export default function LeadsTable({ refreshKey, sourceUrl }: LeadsTableProps) {
                           className="text-primary hover:text-primary/80 transition-colors flex items-center gap-1.5"
                           title={lead.linkedin_url}
                         >
-                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/><rect width="4" height="12" x="2" y="9"/><circle cx="4" cy="4" r="2"/></svg>
-                          <span className="text-xs font-mono truncate max-w-[150px]">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z" />
+                            <rect width="4" height="12" x="2" y="9" />
+                            <circle cx="4" cy="4" r="2" />
+                          </svg>
+                          <span className="text-xs font-mono truncate max-w-[120px]">
                             {(() => {
                               try {
-                                return new URL(lead.linkedin_url).pathname.replace('/in/', '').replace(/\//g, '');
+                                return new URL(lead.linkedin_url).pathname
+                                  .replace("/in/", "")
+                                  .replace(/\//g, "");
                               } catch {
-                                return "View Profile";
+                                return "Profile";
                               }
                             })()}
                           </span>
                         </a>
                       ) : (
-                        <span className="text-muted-foreground">—</span>
+                        <span className="text-muted-foreground">{"\u2014"}</span>
                       )}
                     </TableCell>
-                    <TableCell className="text-muted-foreground text-xs max-w-[180px] truncate italic" title={lead.headline || undefined}>
-                      {lead.headline || "—"}
-                    </TableCell>
-                    <TableCell className="font-medium text-foreground max-w-[150px] truncate" title={lead.job_title || undefined}>
-                      {lead.job_title || "—"}
-                    </TableCell>
-                    <TableCell className="font-bold text-primary/90 max-w-[150px] truncate" title={lead.company || undefined}>
-                      {lead.company || "—"}
+                    <TableCell
+                      className="font-bold text-primary/90 max-w-[160px] truncate"
+                      title={lead.company || undefined}
+                    >
+                      {lead.company || "\u2014"}
                     </TableCell>
                     <TableCell>
-                      {lead.email ? (
+                      {lead.company_linkedin_url ? (
                         <a
-                          href={`mailto:${lead.email}`}
-                          className="text-primary hover:underline underline-offset-4 text-sm"
+                          href={lead.company_linkedin_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-primary hover:text-primary/80 transition-colors flex items-center gap-1.5"
+                          title={lead.company_linkedin_url}
                         >
-                          {lead.email}
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" />
+                            <path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" />
+                            <path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2" />
+                            <path d="M10 6h4" />
+                            <path d="M10 10h4" />
+                            <path d="M10 14h4" />
+                            <path d="M10 18h4" />
+                          </svg>
+                          <span className="text-xs font-mono truncate max-w-[100px]">
+                            {(() => {
+                              try {
+                                return new URL(lead.company_linkedin_url).pathname
+                                  .replace("/company/", "")
+                                  .replace(/\//g, "");
+                              } catch {
+                                return "Company";
+                              }
+                            })()}
+                          </span>
                         </a>
                       ) : (
-                        <span className="text-muted-foreground">—</span>
+                        <span className="text-muted-foreground">{"\u2014"}</span>
                       )}
+                    </TableCell>
+                    <TableCell
+                      className="text-muted-foreground text-sm max-w-[140px] truncate"
+                      title={lead.location || undefined}
+                    >
+                      {lead.location || "\u2014"}
                     </TableCell>
                     <TableCell className="text-center">
                       {statusBadge(lead.status)}

@@ -41,9 +41,9 @@ export default function HomePage() {
             Into Leads
           </h1>
           <p className="text-lg sm:text-xl text-muted-foreground max-w-xl mx-auto leading-relaxed">
-            Paste any LinkedIn post URL. We extract every person who engaged,
-            parse their job titles with AI, and enrich them with verified
-            emails — automatically.
+            Paste any LinkedIn post URL. We extract every reactor with their
+            job title, company, and company LinkedIn page — powered by AI,
+            completely free.
           </p>
         </div>
 
@@ -101,7 +101,8 @@ export default function HomePage() {
             </div>
             <h3 className="font-semibold">Extract</h3>
             <p className="text-sm text-muted-foreground">
-              Scrape all profiles that liked or commented on any LinkedIn post.
+              Scrape all profiles that reacted on any LinkedIn post — no
+              limits.
             </p>
           </div>
           <div className="rounded-xl border border-border/40 bg-card/50 backdrop-blur-sm p-6 space-y-2">
@@ -122,7 +123,8 @@ export default function HomePage() {
             </div>
             <h3 className="font-semibold">Parse</h3>
             <p className="text-sm text-muted-foreground">
-              AI-powered job title and company extraction from messy headlines.
+              AI-powered job title and company extraction from profile
+              headlines.
             </p>
           </div>
           <div className="rounded-xl border border-border/40 bg-card/50 backdrop-blur-sm p-6 space-y-2">
@@ -137,13 +139,18 @@ export default function HomePage() {
                 strokeLinejoin="round"
                 className="h-5 w-5 text-chart-1"
               >
-                <rect width="20" height="16" x="2" y="4" rx="2" />
-                <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
+                <path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" />
+                <path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" />
+                <path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2" />
+                <path d="M10 6h4" />
+                <path d="M10 10h4" />
+                <path d="M10 14h4" />
+                <path d="M10 18h4" />
               </svg>
             </div>
-            <h3 className="font-semibold">Enrich</h3>
+            <h3 className="font-semibold">Company Intel</h3>
             <p className="text-sm text-muted-foreground">
-              Get verified business emails via Apollo.io&apos;s B2B database.
+              Get company names and LinkedIn company pages for every reactor — export to CSV.
             </p>
           </div>
         </div>

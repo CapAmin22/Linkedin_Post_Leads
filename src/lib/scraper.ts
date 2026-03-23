@@ -1,16 +1,15 @@
 /**
- * Trigger.dev background task: LinkedIn post → enriched leads.
+ * LinkedIn Post Reactor Scraper — Zero-cost, local Playwright execution.
  *
  * Architecture:
- *   1. Launch headless Chromium (Playwright) with anti-detection
+ *   1. Launch headless Chromium (Playwright) locally with anti-detection
  *   2. Login to LinkedIn (LINKEDIN_EMAIL / LINKEDIN_PASSWORD env vars)
- *   3. Scrape reactors from the post (scroll modal, collect up to `limit`)
- *   4. Deep-dive each profile page (job title, company, contact email)
- *   5. Fill gaps via LLM waterfall (Groq → Gemini → OpenAI → Regex)
+ *   3. Scrape ALL reactors from the post (scroll until exhausted)
+ *   4. Deep-dive each profile (name, location, job title, company, company URL)
+ *   5. Fill gaps via LLM waterfall (Groq → Gemini → Regex)
  *   6. Save enriched leads to Supabase
- *   7. Emit progress events via task metadata (polled by the SSE route)
+ *   7. Yield progress events for SSE streaming
  */
-import { task, metadata as taskMeta, logger } from "@trigger.dev/sdk/v3";
 import { chromium, type Browser, type Page, type Locator } from "playwright";
 import { createClient } from "@supabase/supabase-js";
 import {
@@ -64,7 +63,6 @@ async function newStealthPage(browser: Browser): Promise<Page> {
     locale: "en-US",
     timezoneId: "America/New_York",
   });
-  // Hide webdriver + other automation signals
   await ctx.addInitScript(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     (window as unknown as Record<string, unknown>).chrome = { runtime: {} };
@@ -109,7 +107,6 @@ async function tryClickButton(page: Page): Promise<boolean> {
       /* try next */
     }
   }
-  // Fallback: any button whose text is a number
   const btns = await page.$$("button");
   for (const btn of btns) {
     const txt = ((await btn.textContent()) || "").trim().replace(/,/g, "");
@@ -135,8 +132,7 @@ async function findModal(page: Page): Promise<Locator | null> {
 
 async function scrapeReactions(
   page: Page,
-  postUrl: string,
-  limit: number
+  postUrl: string
 ): Promise<Reactor[]> {
   await page.goto(postUrl, { waitUntil: "networkidle", timeout: 30000 });
   await page.waitForTimeout(3000);
@@ -152,13 +148,14 @@ async function scrapeReactions(
   const reactors: Reactor[] = [];
   const seen = new Set<string>();
   let stale = 0;
+  const MAX_SCROLLS = 200; // Support large posts
 
-  for (let scroll = 0; scroll < 25 && reactors.length < limit; scroll++) {
+  for (let scroll = 0; scroll < MAX_SCROLLS; scroll++) {
     const rows = modal.locator(".artdeco-list__item");
     const count = await rows.count();
     let added = 0;
 
-    for (let i = 0; i < count && reactors.length < limit; i++) {
+    for (let i = 0; i < count; i++) {
       const row = rows.nth(i);
 
       let name = "";
@@ -209,7 +206,12 @@ async function scrapeReactions(
 
       if (name && profileUrl && !seen.has(profileUrl)) {
         seen.add(profileUrl);
-        reactors.push({ fullName: name, headline, profileUrl, reactionType: "" });
+        reactors.push({
+          fullName: name,
+          headline,
+          profileUrl,
+          reactionType: "",
+        });
         added++;
       }
     }
@@ -227,7 +229,7 @@ async function scrapeReactions(
     await page.waitForTimeout(1500);
   }
 
-  return reactors.slice(0, limit);
+  return reactors;
 }
 
 // ─── Profile deep-dive ────────────────────────────────────────────────
@@ -237,6 +239,7 @@ interface ProfileData {
   jobTitle: string;
   company: string;
   companyUrl: string;
+  location: string;
   email: string;
   fullName: string;
 }
@@ -251,6 +254,7 @@ async function scrapeProfile(
     jobTitle: "",
     company: "",
     companyUrl: "",
+    location: "",
     email: "",
     fullName,
   };
@@ -270,6 +274,23 @@ async function scrapeProfile(
           (await page.locator(sel).first().textContent({ timeout: 2000 })) || ""
         ).trim();
         if (jobTitle) break;
+      } catch {
+        /* try next */
+      }
+    }
+
+    // Location from profile header
+    let location = "";
+    for (const sel of [
+      ".text-body-small.inline.t-black--light.break-words",
+      ".pv-text-details__left-panel .text-body-small",
+      "span.text-body-small.break-words",
+    ]) {
+      try {
+        location = (
+          (await page.locator(sel).first().textContent({ timeout: 2000 })) || ""
+        ).trim();
+        if (location) break;
       } catch {
         /* try next */
       }
@@ -300,7 +321,7 @@ async function scrapeProfile(
       /* no experience section */
     }
 
-    // Email via contact-info overlay
+    // Email via contact-info overlay (free — reads public profile data)
     let email = "";
     try {
       await page
@@ -319,214 +340,240 @@ async function scrapeProfile(
       /* no public email */
     }
 
-    return { linkedinUrl: profileUrl, jobTitle, company, companyUrl, email, fullName };
+    return {
+      linkedinUrl: profileUrl,
+      jobTitle,
+      company,
+      companyUrl,
+      location,
+      email,
+      fullName,
+    };
   } catch {
     return empty;
   }
 }
 
-// ─── Trigger.dev task ─────────────────────────────────────────────────
+// ─── Main scraping generator ─────────────────────────────────────────
 
-export const scrapeLinkedInPost = task({
-  id: "scrape-linkedin-post",
-  maxDuration: 600,
+export async function* scrapeLinkedInPost(params: {
+  url: string;
+  userId: string;
+}): AsyncGenerator<PipelineEvent> {
+  const { url, userId } = params;
 
-  run: async (payload: { url: string; userId: string; limit?: number }) => {
-    const { url, userId, limit = 20 } = payload;
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
 
-    // Event bus: accumulates all progress events; SSE route polls these
-    const events: PipelineEvent[] = [];
-    const emit = (event: PipelineEvent) => {
-      events.push(event);
-      // Fire-and-forget — flush is best-effort for real-time progress
-      taskMeta
-        .set("events", events as never)
-        .flush()
-        .catch(() => {});
-      logger.info(event.message);
+  const linkedinEmail = process.env.LINKEDIN_EMAIL;
+  const linkedinPassword = process.env.LINKEDIN_PASSWORD;
+  if (!linkedinEmail || !linkedinPassword) {
+    yield {
+      type: "error",
+      message:
+        "LINKEDIN_EMAIL / LINKEDIN_PASSWORD not set in environment variables",
+    };
+    return;
+  }
+
+  // ── Step 1: Scrape reactions ──────────────────────────────────────
+  yield { type: "step", message: "Step 1/3 — Launching browser..." };
+
+  let reactors: Reactor[] = [];
+  const profileMap = new Map<string, ProfileData>();
+  const browser = await createBrowser();
+
+  try {
+    const page = await newStealthPage(browser);
+
+    yield { type: "step", message: "Logging in to LinkedIn..." };
+    try {
+      await loginLinkedIn(page, linkedinEmail, linkedinPassword);
+      yield { type: "step", message: "Logged in successfully" };
+    } catch (err: unknown) {
+      yield {
+        type: "error",
+        message: `Login failed: ${(err as Error)?.message}. Check LINKEDIN_EMAIL / LINKEDIN_PASSWORD.`,
+      };
+      return;
+    }
+
+    yield { type: "step", message: "Navigating to post..." };
+    reactors = await scrapeReactions(page, url);
+    yield {
+      type: "step",
+      message: `Found ${reactors.length} reactor(s)`,
     };
 
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
-
-    const linkedinEmail = process.env.LINKEDIN_EMAIL;
-    const linkedinPassword = process.env.LINKEDIN_PASSWORD;
-    if (!linkedinEmail || !linkedinPassword) {
-      emit({
-        type: "error",
+    if (reactors.length === 0) {
+      yield {
+        type: "done",
         message:
-          "❌ LINKEDIN_EMAIL / LINKEDIN_PASSWORD not set in environment variables",
-      });
-      await taskMeta.set("done" as never, true as never).flush();
+          "No reactors found. Post may have 0 reactions or URL is incorrect.",
+        data: { leadsProcessed: 0 },
+      };
       return;
     }
 
-    // ── Step 1: Scrape reactions ──────────────────────────────────────
-    emit({ type: "step", message: "🔍 Step 1/3 — Launching browser..." });
+    // ── Step 2: Profile deep-dive ─────────────────────────────────
+    yield {
+      type: "step",
+      message: `Step 2/3 — Scraping ${reactors.length} profile(s)...`,
+    };
 
-    let reactors: Reactor[] = [];
-    const profileMap = new Map<string, ProfileData>();
-    const browser = await createBrowser();
-
-    try {
-      const page = await newStealthPage(browser);
-
-      emit({ type: "step", message: "🔑 Logging in to LinkedIn..." });
-      try {
-        await loginLinkedIn(page, linkedinEmail, linkedinPassword);
-        emit({ type: "step", message: "✅ Logged in" });
-      } catch (err: unknown) {
-        emit({
-          type: "error",
-          message: `❌ Login failed: ${(err as Error)?.message}. Check LINKEDIN_EMAIL / LINKEDIN_PASSWORD.`,
-        });
-        return;
+    for (let i = 0; i < reactors.length; i++) {
+      const reactor = reactors[i];
+      if (!reactor.profileUrl.startsWith("http")) continue;
+      const data = await scrapeProfile(
+        page,
+        reactor.profileUrl,
+        reactor.fullName
+      );
+      profileMap.set(reactor.profileUrl.replace(/\/$/, ""), data);
+      if ((i + 1) % 5 === 0 || i === reactors.length - 1) {
+        yield {
+          type: "step",
+          message: `  Profiles scraped: ${i + 1}/${reactors.length}`,
+        };
       }
+    }
 
-      emit({ type: "step", message: `🔎 Navigating to post...` });
-      reactors = await scrapeReactions(page, url, limit);
-      emit({
-        type: "step",
-        message: `📋 Found ${reactors.length} reactor(s)`,
-      });
+    yield {
+      type: "step",
+      message: `${profileMap.size} profiles enriched`,
+    };
+  } finally {
+    await browser.close();
+  }
 
-      if (reactors.length === 0) {
-        emit({
-          type: "done",
-          message: "⚠️ No reactors found. Post may have 0 reactions or URL is wrong.",
-          data: { leadsProcessed: 0 },
-        });
-        await taskMeta.set("done" as never, true as never).flush();
-        return;
-      }
+  // ── Step 3: LLM parsing ───────────────────────────────────────────
+  const events: PipelineEvent[] = [];
+  const emit = (event: PipelineEvent) => {
+    events.push(event);
+  };
 
-      // ── Step 2: Profile deep-dive ─────────────────────────────────
-      emit({
-        type: "step",
-        message: `🔎 Step 2/3 — Deep-diving ${reactors.length} profile(s)...`,
-      });
+  const normalized = normalizeProfiles(
+    reactors as unknown as Record<string, unknown>[],
+    emit
+  );
+  // Yield any events from normalizeProfiles
+  for (const e of events) yield e;
 
-      for (let i = 0; i < reactors.length; i++) {
-        const reactor = reactors[i];
-        if (!reactor.profileUrl.startsWith("http")) continue;
-        const data = await scrapeProfile(page, reactor.profileUrl, reactor.fullName);
-        profileMap.set(reactor.profileUrl.replace(/\/$/, ""), data);
-        if ((i + 1) % 5 === 0 || i === reactors.length - 1) {
-          emit({
-            type: "step",
-            message: `  ↳ Profiles scraped: ${i + 1}/${reactors.length}`,
+  const parsedTitles = new Map<number, ParsedTitle>();
+
+  // Pre-fill from Playwright profile data
+  normalized.forEach((p, i) => {
+    const cleanUrl = p.linkedinUrl
+      .split("?")[0]
+      .replace(/\/$/, "")
+      .toLowerCase();
+    for (const [k, v] of profileMap) {
+      if (k.toLowerCase() === cleanUrl) {
+        if (v.jobTitle || v.company) {
+          parsedTitles.set(i, {
+            jobTitle: v.jobTitle,
+            company: v.company,
+            companyUrl: v.companyUrl,
           });
         }
+        break;
       }
-
-      emit({
-        type: "step",
-        message: `✅ ${profileMap.size} profiles enriched`,
-      });
-    } finally {
-      await browser.close();
     }
+  });
 
-    // ── Step 3: LLM parsing ───────────────────────────────────────────
-    const normalized = normalizeProfiles(reactors as unknown as Record<string, unknown>[], emit);
-    const parsedTitles = new Map<number, ParsedTitle>();
-
-    // Pre-fill from Playwright profile data
-    normalized.forEach((p, i) => {
-      const cleanUrl = p.linkedinUrl.split("?")[0].replace(/\/$/, "").toLowerCase();
-      for (const [k, v] of profileMap) {
-        if (k.toLowerCase() === cleanUrl) {
-          if (v.jobTitle || v.company) {
-            parsedTitles.set(i, {
-              jobTitle: v.jobTitle,
-              company: v.company,
-              companyUrl: v.companyUrl,
-            });
-          }
-          break;
-        }
-      }
-    });
-
-    const gaps = normalized.filter((_, i) => !parsedTitles.has(i));
-    if (gaps.length > 0) {
-      emit({
-        type: "step",
-        message: `🤖 Step 3/3 — AI parsing ${gaps.length} unparsed headline(s)...`,
-      });
-      const aiUsed = await runAIParsing(normalized, parsedTitles, emit);
-      emit({ type: "step", message: `📊 Titles resolved via: ${aiUsed}` });
-    } else {
-      emit({ type: "step", message: "✅ All titles resolved from profile deep-dive" });
-    }
-
-    // ── Finalise & save ───────────────────────────────────────────────
-    emit({ type: "step", message: `📧 Finalising ${normalized.length} leads...` });
-
-    const enrichedLeads = normalized.map((profile, i) => {
-      const parsed = parsedTitles.get(i);
-      const cleanUrl = profile.linkedinUrl.split("?")[0].replace(/\/$/, "").toLowerCase();
-
-      let email: string | null = profile.email || null;
-      if (!email) {
-        for (const [k, v] of profileMap) {
-          if (k.toLowerCase() === cleanUrl && v.email) {
-            email = v.email;
-            break;
-          }
-        }
-      }
-
-      return {
-        full_name: profile.fullName || "Unknown",
-        linkedin_url: profile.linkedinUrl,
-        headline: profile.headline,
-        job_title: parsed?.jobTitle || profile.headline || "",
-        company: parsed?.company || "",
-        email,
-        status: "completed",
-      };
-    });
-
-    const emailCount = enrichedLeads.filter((l) => l.email).length;
-    const companyCount = enrichedLeads.filter((l) => l.company).length;
-
-    emit({
+  const gaps = normalized.filter((_, i) => !parsedTitles.has(i));
+  if (gaps.length > 0) {
+    yield {
       type: "step",
-      message: `✅ ${enrichedLeads.length} leads — ${emailCount} emails · ${companyCount} companies`,
-    });
+      message: `Step 3/3 — AI parsing ${gaps.length} unparsed headline(s)...`,
+    };
+    const aiEvents: PipelineEvent[] = [];
+    const aiUsed = await runAIParsing(normalized, parsedTitles, (e) =>
+      aiEvents.push(e)
+    );
+    for (const e of aiEvents) yield e;
+    yield { type: "step", message: `Titles resolved via: ${aiUsed}` };
+  } else {
+    yield {
+      type: "step",
+      message: "All titles resolved from profile deep-dive",
+    };
+  }
 
-    // Save to Supabase
-    emit({ type: "step", message: "💾 Saving to database..." });
-    const { error } = await supabase
-      .from("scraped_leads")
-      .insert(
-        enrichedLeads.map((lead) => ({
-          user_id: userId,
-          source_url: url,
-          ...lead,
-        }))
-      );
+  // ── Finalise & save ───────────────────────────────────────────────
+  yield {
+    type: "step",
+    message: `Finalising ${normalized.length} leads...`,
+  };
 
-    if (error) {
-      emit({
-        type: "error",
-        message: `❌ DB save failed: ${error.message}`,
-        data: { errorDetail: error.message, code: error.code },
-      });
-      await taskMeta.set("done" as never, true as never).flush();
-      return;
+  const enrichedLeads = normalized.map((profile, i) => {
+    const parsed = parsedTitles.get(i);
+    const cleanUrl = profile.linkedinUrl
+      .split("?")[0]
+      .replace(/\/$/, "")
+      .toLowerCase();
+
+    let email: string | null = profile.email || null;
+    let companyLinkedinUrl: string | null = parsed?.companyUrl || null;
+    let location: string | null = null;
+
+    for (const [k, v] of profileMap) {
+      if (k.toLowerCase() === cleanUrl) {
+        if (!email && v.email) email = v.email;
+        if (!companyLinkedinUrl && v.companyUrl)
+          companyLinkedinUrl = v.companyUrl;
+        if (v.location) location = v.location;
+        break;
+      }
     }
 
-    emit({
-      type: "done",
-      message: `🎉 Done! ${enrichedLeads.length} leads saved · ${emailCount} emails · ${companyCount} companies`,
-      data: { leadsProcessed: enrichedLeads.length, emailsFound: emailCount },
-    });
+    return {
+      full_name: profile.fullName || "Unknown",
+      linkedin_url: profile.linkedinUrl,
+      headline: profile.headline,
+      job_title: parsed?.jobTitle || profile.headline || "",
+      company: parsed?.company || "",
+      company_linkedin_url: companyLinkedinUrl,
+      location,
+      email,
+      status: "completed",
+    };
+  });
 
-    await taskMeta.set("done" as unknown as Parameters<typeof taskMeta.set>[0], true as unknown as Parameters<typeof taskMeta.set>[1]);
-    return { leadsProcessed: enrichedLeads.length, emailsFound: emailCount };
-  },
-});
+  const companyCount = enrichedLeads.filter((l) => l.company).length;
+  const companyUrlCount = enrichedLeads.filter(
+    (l) => l.company_linkedin_url
+  ).length;
+
+  yield {
+    type: "step",
+    message: `${enrichedLeads.length} leads — ${companyCount} companies · ${companyUrlCount} company URLs`,
+  };
+
+  // Save to Supabase
+  yield { type: "step", message: "Saving to database..." };
+  const { error } = await supabase.from("scraped_leads").insert(
+    enrichedLeads.map((lead) => ({
+      user_id: userId,
+      source_url: url,
+      ...lead,
+    }))
+  );
+
+  if (error) {
+    yield {
+      type: "error",
+      message: `DB save failed: ${error.message}`,
+      data: { errorDetail: error.message, code: error.code },
+    };
+    return;
+  }
+
+  yield {
+    type: "done",
+    message: `Done! ${enrichedLeads.length} leads saved — ${companyCount} companies · ${companyUrlCount} company URLs`,
+    data: { leadsProcessed: enrichedLeads.length },
+  };
+}

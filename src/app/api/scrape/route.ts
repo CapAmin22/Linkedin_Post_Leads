@@ -1,10 +1,9 @@
 import { createClient } from "@/lib/supabase/server";
-import { scrapeLinkedInPost } from "@/trigger/scrape";
-import { runs } from "@trigger.dev/sdk/v3";
+import { scrapeLinkedInPost } from "@/lib/scraper";
 import type { PipelineEvent } from "@/lib/pipeline";
 
-// Vercel: hobby = 60s, pro = 300s.
-// Heavy work runs inside Trigger.dev (max 600s) — Vercel only polls.
+// For self-hosted / local: no strict time limit.
+// For Vercel hobby: 60s, pro: 300s. Consider self-hosting for large posts.
 export const maxDuration = 300;
 
 export async function POST(request: Request) {
@@ -43,17 +42,16 @@ export async function POST(request: Request) {
 
     // ── Check required env vars ───────────────────────────────────────
     const missing: string[] = [];
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) missing.push("NEXT_PUBLIC_SUPABASE_URL");
-    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
-    if (!process.env.TRIGGER_SECRET_KEY) missing.push("TRIGGER_SECRET_KEY");
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL)
+      missing.push("NEXT_PUBLIC_SUPABASE_URL");
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY)
+      missing.push("SUPABASE_SERVICE_ROLE_KEY");
     if (!process.env.LINKEDIN_EMAIL) missing.push("LINKEDIN_EMAIL");
     if (!process.env.LINKEDIN_PASSWORD) missing.push("LINKEDIN_PASSWORD");
-    if (
-      !process.env.OPENAI_API_KEY &&
-      !process.env.GEMINI_API_KEY &&
-      !process.env.GROQ_API_KEY
-    ) {
-      missing.push("at least one LLM key: GROQ_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY");
+    if (!process.env.GROQ_API_KEY && !process.env.GEMINI_API_KEY) {
+      missing.push(
+        "at least one free LLM key: GROQ_API_KEY or GEMINI_API_KEY"
+      );
     }
 
     if (missing.length > 0) {
@@ -63,90 +61,38 @@ export async function POST(request: Request) {
       );
     }
 
-    // ── Trigger background task ───────────────────────────────────────
-    const handle = await scrapeLinkedInPost.trigger({
-      url,
-      userId: user.id,
-      limit: 20,
-    });
-
-    // ── Stream progress via SSE ───────────────────────────────────────
+    // ── Direct execution with SSE streaming ─────────────────────────
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
         const send = (event: PipelineEvent) => {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
-          );
+          try {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
+            );
+          } catch {
+            // Controller may be closed if client disconnected
+          }
         };
 
-        send({ type: "step", message: "⏳ Task queued — starting scraper..." });
-
-        let lastEventCount = 0;
-        let stalePollCount = 0;
-        const MAX_POLLS = 600; // up to 10 minutes
-
-        // Heartbeat so the browser connection stays alive
-        const heartbeat = setInterval(() => {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "step", message: "📡 Working..." })}\n\n`
-            )
-          );
-        }, 15000);
-
         try {
-          for (let poll = 0; poll < MAX_POLLS; poll++) {
-            await new Promise((r) => setTimeout(r, 1000));
-
-            let run: Awaited<ReturnType<typeof runs.retrieve>>;
-            try {
-              run = await runs.retrieve(handle.id);
-            } catch {
-              stalePollCount++;
-              if (stalePollCount >= 10) {
-                send({
-                  type: "error",
-                  message:
-                    "❌ Could not reach Trigger.dev. Is TRIGGER_SECRET_KEY correct? Run `npx trigger.dev@latest dev` locally.",
-                });
-                break;
-              }
-              continue;
-            }
-            stalePollCount = 0;
-
-            // Drain new events from task metadata
-            const allEvents =
-              ((run.metadata as Record<string, unknown>)?.events as PipelineEvent[]) || [];
-            if (allEvents.length > lastEventCount) {
-              allEvents.slice(lastEventCount).forEach(send);
-              lastEventCount = allEvents.length;
-            }
-
-            // Task finished?
-            if (
-              run.status === "COMPLETED" ||
-              run.status === "FAILED" ||
-              run.status === "CRASHED" ||
-              run.status === "CANCELED" ||
-              run.status === "SYSTEM_FAILURE"
-            ) {
-              if (run.status !== "COMPLETED") {
-                send({
-                  type: "error",
-                  message: `❌ Task ended with status: ${run.status}`,
-                });
-              }
-              break;
-            }
+          const scraper = scrapeLinkedInPost({ url, userId: user.id });
+          for await (const event of scraper) {
+            send(event);
           }
-        } finally {
-          clearInterval(heartbeat);
+        } catch (err: unknown) {
+          send({
+            type: "error",
+            message: `Scraping failed: ${(err as Error)?.message || "Unknown error"}`,
+          });
         }
 
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
+        try {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        } catch {
+          // Already closed
+        }
       },
     });
 

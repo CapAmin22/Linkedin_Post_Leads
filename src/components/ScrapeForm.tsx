@@ -83,10 +83,10 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
             try {
               const event: PipelineEvent = JSON.parse(payload);
               
-              // Handle heartbeats: only keep the newest one to avoid clutter
-              if (event.message.includes("Heartbeat")) {
+              // Handle working/heartbeat messages: only keep the newest one
+              if (event.message.includes("Working") || event.message.includes("Heartbeat")) {
                   setSteps((prev) => {
-                      const filtered = prev.filter(s => !s.message.includes("Heartbeat"));
+                      const filtered = prev.filter(s => !s.message.includes("Working") && !s.message.includes("Heartbeat"));
                       return [...filtered, event];
                   });
               } else {
@@ -157,8 +157,8 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
           Extract Leads
         </CardTitle>
         <CardDescription>
-          Paste a LinkedIn post URL to extract, parse, and enrich every person
-          who engaged with it.
+          Paste a LinkedIn post URL to extract every reactor with their title,
+          company, and company LinkedIn page.
         </CardDescription>
       </CardHeader>
       <CardContent>
