@@ -1,140 +1,112 @@
 """
-Scrape current job title, company, company URL, and email from LinkedIn profiles.
+Scrape job title, company, and email from LinkedIn profiles using the
+linkedin-api library (no browser / Selenium required).
 
 Strategy
 --------
-- One Selenium session for the whole batch (login once, reuse cookies).
-- Scrapy Selector parses rendered page HTML — clean CSS/XPath extraction.
-- Email discovered via the no-API cascade in emails.py.
-- Results returned as plain dicts.
+- api.get_profile(public_id) returns structured profile data including
+  full name, headline, and current experience (job title + company).
+- api.get_profile_contact_info(public_id) returns email if the person
+  has made it publicly visible on LinkedIn.
+- If no LinkedIn email, fall back to the no-browser email discovery
+  pipeline in emails.py (company website → pattern + DNS MX).
 """
+import re
 import time
 import logging
 
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-from scrapy import Selector
-
-from .auth import create_driver, linkedin_login
-from .items import ProfileItem
-from .pipelines import CleanFieldsPipeline
-from .emails import discover_email
+from .auth import create_linkedin_client
+from .emails import discover_email_no_browser
 
 logger = logging.getLogger(__name__)
-_pipeline = CleanFieldsPipeline()
 
-# ── Selector fallback chains ──────────────────────────────────────────────────
-# LinkedIn redesigns its DOM regularly; we try multiple patterns in order.
-
-_PROFILE_READY = [
-    ".pv-top-card",
-    ".profile-photo-edit__preview",
-    ".artdeco-card",
-    "main .scaffold-layout__main",
-]
-
-# Job title selectors (2024+ layout first, legacy last)
-_JOB_TITLE_CSS = [
-    # New 2024 — top-card sub-headline
-    ".pv-text-details__left-panel .text-body-medium::text",
-    # pvs = profile view section (experience)
-    ".pvs-list__item--line-separated:first-child .mr1.t-bold span[aria-hidden='true']::text",
-    # Legacy experience section
-    ".experience-section li:first-child .pv-entity__summary-info h3::text",
-    # Fallback: top-card headline (includes company usually, will be split by AI later)
-    ".pv-top-card--headline::text",
-    ".text-body-medium.break-words::text",
-]
-
-# Company name selectors
-_COMPANY_CSS = [
-    ".pvs-list__item--line-separated:first-child .t-14.t-normal span[aria-hidden='true']::text",
-    ".experience-section li:first-child .pv-entity__secondary-title::text",
-    ".pv-top-card--experience-list-item:first-child span[aria-hidden='true']::text",
-]
-
-# Company LinkedIn URL selectors
-_COMPANY_URL_CSS = [
-    ".pvs-list__item--line-separated:first-child a[href*='/company/']::attr(href)",
-    ".experience-section a[href*='/company/']::attr(href)",
-    "a[href*='/company/']::attr(href)",
-]
-
-# Company website from "About" section (some profiles show it)
-_COMPANY_WEBSITE_CSS = [
-    "a[href*='://'][data-tracking-control-name*='website']::attr(href)",
-    ".pv-top-card--website a::attr(href)",
-]
+_IN_RE = re.compile(r"/in/([^/?#]+)", re.I)
 
 
-def _first(sel: Selector, css_list: list[str]) -> str:
-    for css in css_list:
-        val = sel.css(css).get()
-        if val and val.strip():
-            return val.strip()
-    return ""
+def _public_id_from_url(url: str) -> str:
+    """Extract the vanity slug from a LinkedIn /in/ profile URL."""
+    m = _IN_RE.search(url)
+    return m.group(1) if m else ""
 
 
-def _scrape_one(driver, url: str, scrape_email: bool) -> dict:
-    """Scrape a single profile. Driver must already be authenticated."""
+def _scrape_one_profile(api, url: str, scrape_email: bool) -> dict:
     clean_url = url.split("?")[0].rstrip("/")
-    try:
-        driver.get(clean_url)
+    result: dict = {
+        "linkedinUrl": clean_url,
+        "jobTitle": "",
+        "company": "",
+        "companyUrl": "",
+        "email": "",
+        "fullName": "",
+    }
 
-        # Wait for any recognisable profile element
-        for css in _PROFILE_READY:
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, css))
-                )
-                break
-            except TimeoutException:
-                continue
-
-        time.sleep(1.2)  # let lazy sections render
-
-        sel = Selector(text=driver.page_source)
-
-        job_title    = _first(sel, _JOB_TITLE_CSS)
-        company      = _first(sel, _COMPANY_CSS)
-        company_url  = _first(sel, _COMPANY_URL_CSS).split("?")[0].rstrip("/")
-        company_site = _first(sel, _COMPANY_WEBSITE_CSS).split("?")[0].rstrip("/")
-
-        # Derive full name from page title (used for email discovery)
-        page_title = sel.css("title::text").get("").split("|")[0].strip()
-        full_name = page_title.split("-")[0].strip() if "-" in page_title else page_title
-
-        email = ""
-        if scrape_email:
-            email = discover_email(
-                driver,
-                full_name=full_name,
-                linkedin_url=clean_url,
-                company=company,
-                company_url=company_url,
-                company_website=company_site,
-            )
-
-        item = ProfileItem(
-            linkedinUrl=clean_url,
-            jobTitle=job_title,
-            company=company,
-            companyUrl=company_url,
-        )
-        result = dict(_pipeline.process_item(item, None))
-        result["email"] = email
-        result["fullName"] = full_name
+    public_id = _public_id_from_url(url)
+    if not public_id:
+        logger.warning("Cannot extract public_id from URL: %s", url)
         return result
 
+    try:
+        profile = api.get_profile(public_id)
+
+        # ── Name ──────────────────────────────────────────────────────
+        first = profile.get("firstName", "")
+        last = profile.get("lastName", "")
+        result["fullName"] = f"{first} {last}".strip()
+
+        # ── Job title + company from most-recent experience ────────────
+        experience: list[dict] = profile.get("experience") or []
+        if experience:
+            exp = experience[0]
+            result["jobTitle"] = exp.get("title", "")
+            result["company"] = exp.get("companyName", "")
+            # Build company LinkedIn URL from universalName if present
+            company_obj = exp.get("company") or {}
+            universal_name = company_obj.get("universalName", "")
+            if universal_name:
+                result["companyUrl"] = (
+                    f"https://www.linkedin.com/company/{universal_name}/"
+                )
+
+        # Fall back to headline if experience is missing
+        if not result["jobTitle"]:
+            result["jobTitle"] = profile.get("headline", "")
+
+        # ── Email discovery ────────────────────────────────────────────
+        if scrape_email:
+            email = _get_email(api, public_id, result)
+            result["email"] = email
+
     except Exception as exc:
-        logger.warning("Failed to scrape %s: %s", clean_url, exc)
-        return {
-            "linkedinUrl": clean_url,
-            "jobTitle": "", "company": "",
-            "companyUrl": "", "email": "", "fullName": "",
-        }
+        logger.warning("Profile API call failed for %s: %s", url, exc)
+
+    return result
+
+
+def _get_email(api, public_id: str, profile_result: dict) -> str:
+    """Try LinkedIn contact info first, then fall back to website/DNS discovery."""
+    # Step 1: LinkedIn contact info (free if person shared their email)
+    try:
+        contact_info = api.get_profile_contact_info(public_id)
+        email = contact_info.get("email_address", "") or ""
+        if email:
+            logger.info("Email via LinkedIn contact info: %s", email)
+            return email
+
+        # Extract company website from contact info websites list
+        websites: list[dict] = contact_info.get("websites") or []
+        company_website = (websites[0].get("url", "") if websites else "")
+    except Exception as exc:
+        logger.debug("Contact info fetch failed for %s: %s", public_id, exc)
+        company_website = ""
+
+    # Step 2/3: website scraping + pattern guessing
+    return discover_email_no_browser(
+        full_name=profile_result.get("fullName", ""),
+        linkedin_url=profile_result.get("linkedinUrl", ""),
+        company=profile_result.get("company", ""),
+        company_url=profile_result.get("companyUrl", ""),
+        company_website=company_website,
+    )
 
 
 def scrape_profiles(
@@ -144,24 +116,18 @@ def scrape_profiles(
     scrape_email: bool = False,
 ) -> list[dict]:
     """
-    Scrape job title + company (+optionally email) for every URL.
-    Uses one browser session for the whole batch.
+    Scrape job title + company (+ optionally email) for every URL.
+    Reuses one authenticated API client for the whole batch.
     """
     if not profile_urls:
         return []
 
-    driver = create_driver()
+    api = create_linkedin_client(email, password)
     results: list[dict] = []
-    try:
-        linkedin_login(driver, email, password)
-        for url in profile_urls:
-            results.append(_scrape_one(driver, url, scrape_email))
-            time.sleep(1.0)  # polite delay between profile requests
-    except Exception as exc:
-        logger.error("Profile scraping session failed: %s", exc, exc_info=True)
-        raise
-    finally:
-        driver.quit()
+
+    for url in profile_urls:
+        results.append(_scrape_one_profile(api, url, scrape_email))
+        time.sleep(0.8)  # polite pacing to avoid rate-limiting
 
     logger.info("Scraped %d profile(s)", len(results))
     return results
@@ -173,31 +139,23 @@ def scrape_emails_for_profiles(
     password: str,
 ) -> list[dict]:
     """
-    Given profiles that already have linkedinUrl, company, companyUrl —
-    run only the email discovery step for each, reusing one browser session.
-    This is called as a separate pass after profile data is collected.
+    Run email discovery for profiles that don't already have an email.
+    Called as a separate pass after profile data is collected.
     """
     if not profiles:
         return profiles
 
-    driver = create_driver()
-    try:
-        linkedin_login(driver, email, password)
-        for p in profiles:
-            if p.get("email"):
-                continue  # already found — skip
-            p["email"] = discover_email(
-                driver,
-                full_name=p.get("fullName", ""),
-                linkedin_url=p.get("linkedinUrl", ""),
-                company=p.get("company", ""),
-                company_url=p.get("companyUrl", ""),
-                company_website=p.get("companyWebsite", ""),
-            )
-            time.sleep(0.8)
-    except Exception as exc:
-        logger.error("Email scraping pass failed: %s", exc, exc_info=True)
-    finally:
-        driver.quit()
+    api = create_linkedin_client(email, password)
+
+    for p in profiles:
+        if p.get("email"):
+            continue  # already found — skip
+
+        public_id = _public_id_from_url(p.get("linkedinUrl", ""))
+        if not public_id:
+            continue
+
+        p["email"] = _get_email(api, public_id, p)
+        time.sleep(0.6)
 
     return profiles

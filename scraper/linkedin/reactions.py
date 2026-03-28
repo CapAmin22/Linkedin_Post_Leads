@@ -1,235 +1,169 @@
 """
-Scrape who reacted to a LinkedIn post.
+Scrape who reacted to a LinkedIn post via LinkedIn's internal Voyager API.
+No browser / Selenium required.
 
 Strategy
 --------
-- Selenium drives Chrome: login → navigate → click reactions button → scroll modal.
-- Scrapy Selector parses the modal's innerHTML with CSS selectors.
-- Multiple selector fallbacks handle LinkedIn DOM changes across years.
-- Returns plain dicts (serialised from ReactorItem).
+- linkedin-api authenticates via HTTP (cookie-based, no browser).
+- We extract the activity URN from the post URL.
+- We call LinkedIn's /voyager/api/reactions endpoint through the
+  authenticated session, paging until we hit the requested limit.
 """
-import time
+import re
 import logging
+from urllib.parse import unquote
 
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from scrapy import Selector
-
-from .auth import create_driver, linkedin_login
-from .items import ReactorItem
-from .pipelines import CleanFieldsPipeline
+from .auth import create_linkedin_client
 
 logger = logging.getLogger(__name__)
-_pipeline = CleanFieldsPipeline()
 
-# ── Selector banks (tried in order; first match wins) ────────────────────────
-
-# Buttons that open the reactions/likes modal
-_BTN_SELECTORS = [
-    # 2024 feed layout
-    "button.social-details-social-counts__count-value",
-    ".social-details-social-counts__count-value",
-    # Older layout
-    ".social-counts__reactions button",
-    ".feed-shared-social-counts button",
-    # Aria-label based (most robust but slower)
-    "button[aria-label*='reaction']",
-    "button[aria-label*='like']",
-    "button[aria-label*='Like']",
-    # Data-attr fallback
-    "[data-test-id*='social-counts'] button",
-    # Generic: any button near the reaction count area
-    ".feed-shared-social-action-bar button:first-child",
-]
-
-# The container that holds the reactor list once the modal is open
-_MODAL_SELECTORS = [
-    ".artdeco-modal__content",
-    ".social-details-reactors-modal",
-    ".reactions-tabpanel",
-    "[class*='reactions-modal']",
-    "[class*='reactor-list']",
-    # 2024 redesign
-    ".scaffold-finite-scroll__content",
-]
-
-# Individual reactor rows inside the modal
-_ROW_SELECTORS = [
-    # 2024 list items
-    ".artdeco-list__item",
-    # Older modal structure
-    ".social-details-reactors-modal__reactor-list li",
-    "[class*='reactor-list'] li",
-    "li.reacted-people-list__list-item",
-    # Fallback: generic list items inside modal
-    "li",
-]
-
-# Name within a row
-_NAME_CSS = [
-    ".artdeco-entity-lockup__title span[aria-hidden='true']::text",
-    ".artdeco-entity-lockup__title::text",
-    ".actor-name span[aria-hidden='true']::text",
-    "span[aria-hidden='true']::text",
-    # 2024
-    ".lockup__title span::text",
-]
-
-# Headline within a row
-_HEADLINE_CSS = [
-    ".artdeco-entity-lockup__subtitle span[aria-hidden='true']::text",
-    ".artdeco-entity-lockup__subtitle::text",
-    ".actor-description span[aria-hidden='true']::text",
-    ".lockup__subtitle span::text",
-]
+# Matches urn:li:activity:..., urn:li:ugcPost:..., urn:li:share:...
+_URN_RE = re.compile(r"urn:li:(?:activity|ugcPost|share|article):\d+", re.I)
+# Matches the numeric ID embedded in post slugs like "activity6803419522233446400"
+_ACTIVITY_SLUG_RE = re.compile(r"activity(\d{10,})", re.I)
 
 
-def _try_click(driver, selectors: list[str], wait: WebDriverWait) -> bool:
-    for sel in selectors:
-        try:
-            el = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
-            driver.execute_script("arguments[0].click();", el)
-            return True
-        except TimeoutException:
-            continue
-    return False
+def _extract_urn(post_url: str) -> str:
+    """
+    Extract the LinkedIn URN from various post URL formats:
+      - https://www.linkedin.com/feed/update/urn:li:activity:123456/
+      - https://www.linkedin.com/feed/update/urn%3Ali%3Aactivity%3A123456/
+      - https://www.linkedin.com/posts/user_slug-activity123456-xxxx/
+    """
+    for url in (post_url, unquote(post_url)):
+        m = _URN_RE.search(url)
+        if m:
+            return m.group(0)
+
+    m = _ACTIVITY_SLUG_RE.search(post_url)
+    if m:
+        return f"urn:li:activity:{m.group(1)}"
+
+    raise ValueError(f"Cannot extract activity URN from LinkedIn URL: {post_url}")
 
 
-def _find_modal(selectors: list[str], wait: WebDriverWait):
-    for sel in selectors:
-        try:
-            return wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
-        except TimeoutException:
-            continue
-    return None
+def _urn_numeric_id(urn: str) -> str:
+    """Return just the numeric part of a URN, e.g. '123456' from 'urn:li:activity:123456'."""
+    return urn.rsplit(":", 1)[-1]
 
 
-def _parse_rows(modal_html: str, limit: int, seen: set[str]) -> list[dict]:
-    """Parse reactor rows from modal innerHTML via Scrapy Selector."""
-    sel = Selector(text=modal_html)
-    results: list[dict] = []
+def _fetch_reactions_page(api, urn: str, start: int, count: int) -> list[dict]:
+    """Fetch one page of raw reaction elements from the Voyager API."""
+    try:
+        # Uses the same endpoint as linkedin-api's get_post_reactions()
+        res = api._fetch(
+            "/voyagerSocialDashReactions",
+            params={
+                "decorationId": "com.linkedin.voyager.dash.deco.social.ReactionsByTypeWithProfileActions-13",
+                "count": count,
+                "q": "reactionType",
+                "start": start,
+                "threadUrn": urn,
+            },
+        )
+        data: dict = res.json()
+        return data.get("elements") or []
+    except Exception as exc:
+        logger.warning("Reaction page fetch failed (start=%d): %s", start, exc)
+        return []
 
-    rows = []
-    for row_sel in _ROW_SELECTORS:
-        rows = sel.css(row_sel)
-        if rows:
+
+def _parse_reactor(elem: dict) -> dict | None:
+    """
+    Convert a raw Voyager reaction element into our standard reactor dict.
+    Handles both the normalized JSON format and the miniProfile format.
+    """
+    actor = elem.get("actor") or {}
+
+    # ── Name ──────────────────────────────────────────────────────────
+    name = ""
+    # Check structured name objects first
+    for key in ("name", "title"):
+        val = actor.get(key, "")
+        if isinstance(val, dict):
+            name = val.get("text", "")
+        elif isinstance(val, str):
+            name = val
+        if name:
+            break
+    # Compose from firstName + lastName (miniProfile format)
+    if not name:
+        first = actor.get("firstName", "")
+        last = actor.get("lastName", "")
+        name = f"{first} {last}".strip()
+
+    # ── Headline ───────────────────────────────────────────────────────
+    headline = ""
+    for key in ("description", "subtitle", "occupation", "headline"):
+        val = actor.get(key, "")
+        if isinstance(val, dict):
+            headline = val.get("text", "")
+        elif isinstance(val, str):
+            headline = val
+        if headline:
             break
 
-    for row in rows:
-        if len(results) + len(seen) >= limit:
-            break
+    # ── Profile URL ────────────────────────────────────────────────────
+    profile_url = ""
+    nav = actor.get("navigationUrl", "") or actor.get("url", "")
+    pub_id = actor.get("publicIdentifier", "")
+    if "/in/" in nav:
+        profile_url = nav.split("?")[0].rstrip("/")
+        if not profile_url.startswith("http"):
+            profile_url = "https://www.linkedin.com" + profile_url
+    elif pub_id:
+        profile_url = f"https://www.linkedin.com/in/{pub_id}"
 
-        # ── Name ───────────────────────────────────────────────────────
-        name = ""
-        for css in _NAME_CSS:
-            name = (row.css(css).get() or "").strip()
-            if name:
-                break
+    reaction_type = (elem.get("reactionType") or "").strip()
 
-        # ── Headline ───────────────────────────────────────────────────
-        headline = ""
-        for css in _HEADLINE_CSS:
-            headline = (row.css(css).get() or "").strip()
-            if headline:
-                break
+    if not name and not profile_url:
+        return None
 
-        # ── Profile URL ────────────────────────────────────────────────
-        profile_url = (
-            row.css("a[href*='/in/']::attr(href)").get() or ""
-        ).split("?")[0].rstrip("/")
-
-        # ── Reaction type ──────────────────────────────────────────────
-        reaction_type = (
-            row.css("[aria-label*='reaction']::attr(aria-label)").get()
-            or row.css("img[alt]::attr(alt)").get("")
-        ).strip()
-
-        if name and profile_url and profile_url not in seen:
-            seen.add(profile_url)
-            item = ReactorItem(
-                fullName=name,
-                headline=headline,
-                profileUrl=profile_url,
-                reactionType=reaction_type,
-            )
-            results.append(dict(_pipeline.process_item(item, None)))
-
-    return results
+    return {
+        "fullName": name.strip(),
+        "headline": headline.strip(),
+        "profileUrl": profile_url,
+        "reactionType": reaction_type,
+    }
 
 
 def scrape_reactions(post_url: str, email: str, password: str, limit: int = 20) -> list[dict]:
     """
     Return up to *limit* reactor profiles from the given LinkedIn post URL.
+    Uses LinkedIn's Voyager API — no browser required.
 
     Each dict: fullName, headline, profileUrl, reactionType.
     """
-    driver = create_driver()
-    try:
-        linkedin_login(driver, email, password)
-        logger.info("Navigating to: %s", post_url)
-        driver.get(post_url)
-        time.sleep(3)
+    api = create_linkedin_client(email, password)
+    urn = _extract_urn(post_url)
+    logger.info("Fetching reactions for %s (limit=%d)", urn, limit)
 
-        wait_short = WebDriverWait(driver, 10)
-        wait_long  = WebDriverWait(driver, 15)
+    results: list[dict] = []
+    seen: set[str] = set()
+    start = 0
+    page_size = min(50, limit)
 
-        # ── Click reactions button ─────────────────────────────────────
-        clicked = _try_click(driver, _BTN_SELECTORS, wait_short)
-        if not clicked:
-            # Last-ditch attempt: find any button whose text contains a number
-            try:
-                btns = driver.find_elements(By.TAG_NAME, "button")
-                for btn in btns:
-                    txt = btn.text.strip()
-                    if txt and txt.replace(",", "").replace(".", "").isdigit():
-                        driver.execute_script("arguments[0].click();", btn)
-                        clicked = True
-                        break
-            except Exception:
-                pass
+    while len(results) < limit:
+        fetch_count = min(page_size, limit - len(results))
+        elements = _fetch_reactions_page(api, urn, start, fetch_count)
+        if not elements:
+            break
 
-        if not clicked:
-            logger.warning("Could not find the reactions button — post may have no reactions")
-            return []
-
-        time.sleep(2)
-
-        # ── Find modal ─────────────────────────────────────────────────
-        modal = _find_modal(_MODAL_SELECTORS, wait_long)
-        if not modal:
-            logger.warning("Reactions modal did not appear")
-            return []
-
-        # ── Scroll & parse ─────────────────────────────────────────────
-        profiles: list[dict] = []
-        seen_urls: set[str] = set()
-        stale = 0
-
-        for _ in range(25):  # max scroll attempts
-            if len(profiles) >= limit:
+        for elem in elements:
+            reactor = _parse_reactor(elem)
+            if not reactor:
+                continue
+            key = reactor["profileUrl"] or reactor["fullName"]
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(reactor)
+            if len(results) >= limit:
                 break
 
-            html = modal.get_attribute("innerHTML") or ""
-            batch = _parse_rows(html, limit, seen_urls)
-            profiles.extend(batch)
+        if len(elements) < fetch_count:
+            break  # No more pages
+        start += fetch_count
 
-            if not batch:
-                stale += 1
-                if stale >= 3:
-                    break
-            else:
-                stale = 0
-
-            driver.execute_script("arguments[0].scrollTop += 600;", modal)
-            time.sleep(1.5)
-
-        logger.info("Scraped %d reactor(s)", len(profiles))
-        return profiles[:limit]
-
-    except Exception as exc:
-        logger.error("reactions scraping failed: %s", exc, exc_info=True)
-        raise
-    finally:
-        driver.quit()
+    logger.info("Fetched %d reactor(s)", len(results))
+    return results

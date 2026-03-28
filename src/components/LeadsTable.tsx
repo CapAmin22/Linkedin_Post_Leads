@@ -149,6 +149,7 @@ export default function LeadsTable({ refreshKey }: { refreshKey: number }) {
   const fetchLeads = useCallback(async () => {
     if (!userId) return;
     setLoading(true);
+    setPage(1);
     const { data, error } = await supabase
       .from("scraped_leads")
       .select("*")
@@ -160,8 +161,11 @@ export default function LeadsTable({ refreshKey }: { refreshKey: number }) {
   }, [supabase, userId]);
 
   useEffect(() => {
-    fetchLeads();
-    setPage(1);
+    let mounted = true;
+    if (mounted) {
+      fetchLeads();
+    }
+    return () => { mounted = false; };
   }, [fetchLeads, refreshKey]);
 
   // ── Derived data ──────────────────────────────────────────────────

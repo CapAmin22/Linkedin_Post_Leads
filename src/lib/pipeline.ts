@@ -88,11 +88,11 @@ function scraperBase(): string {
   return (process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL || "").replace(/\/$/, "");
 }
 
-async function callScraper(
+async function callScraper<T = unknown>(
   endpoint: string,
   body: Record<string, unknown>,
   timeoutMs: number
-): Promise<unknown> {
+): Promise<T> {
   const url = `${scraperBase()}${endpoint}`;
   const res = await fetchWithTimeout(
     url,
@@ -107,7 +107,7 @@ async function callScraper(
     const err = (await res.json().catch(() => ({}))) as { detail?: string };
     throw new Error(err.detail || `Scraper ${endpoint} → ${res.status}`);
   }
-  return res.json();
+  return res.json() as Promise<T>;
 }
 
 // ─── Profile Normalizer ───────────────────────────────────────────────
@@ -311,7 +311,7 @@ export async function runAIParsing(
     } catch (err: unknown) {
       onEvent({
         type: "step",
-        message: `⚠️ Groq: ${(err as Error)?.message} — trying Gemini...`,
+        message: `⚠️ Groq: ${(err as Error)?.message || "error"} — trying Gemini...`,
       });
     }
   }
@@ -345,7 +345,7 @@ export async function runAIParsing(
     } catch (err: unknown) {
       onEvent({
         type: "step",
-        message: `⚠️ OpenAI: ${(err as Error)?.message} — using regex fallback...`,
+        message: `⚠️ OpenAI: ${(err as Error)?.message || "error"} — using regex fallback...`,
       });
     }
   }
@@ -451,7 +451,7 @@ export async function runPipeline(
   } catch (err: unknown) {
     onEvent({
       type: "error",
-      message: `❌ Scraper failed: ${(err as Error)?.message}. Is the Python service running at ${scraperBase()}?`,
+      message: `❌ Scraper failed: ${(err as Error)?.message || "error"}. Is the Python service running at ${scraperBase()}?`,
     });
     return;
   }

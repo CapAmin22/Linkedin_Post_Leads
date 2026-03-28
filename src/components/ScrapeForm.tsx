@@ -50,69 +50,44 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
         body: JSON.stringify({ url }),
       });
 
-      // If the response is not a stream (error before streaming started)
-      const contentType = res.headers.get("content-type") || "";
-      if (contentType.includes("application/json")) {
-        const data = await res.json();
+      const data = await res.json();
+      if (!res.ok) {
         throw new Error(data.error || data.details || "Failed to start pipeline");
       }
 
-      if (!res.body) {
-        throw new Error("No response stream received");
+      const jobId = data.jobId;
+      if (!jobId) {
+        throw new Error("No Job ID received from server");
       }
 
-      // Read SSE stream
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+      setSteps((prev) => [...prev, { type: "step", message: "🚀 Task dispatched to background..." }]);
+
+      // ── Polling loop ────────────────────────────────────────────────
+      let done = false;
       let leadsProcessed = 0;
+      let pollCount = 0;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      while (!done && pollCount < 60) { // Max 10 mins (10s intervals)
+        await new Promise((r) => setTimeout(r, 8000));
+        pollCount++;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || ""; 
+        try {
+          const statusRes = await fetch(`/api/job-status?jobId=${jobId}`);
+          const statusData = await statusRes.json();
 
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const payload = line.slice(6).trim();
-            if (payload === "[DONE]") continue;
+          if (statusData.events) {
+            setSteps(statusData.events);
+          }
 
-            try {
-              const event: PipelineEvent = JSON.parse(payload);
-              
-              // Collapse heartbeat / working messages to a single line
-              const isHeartbeat =
-                event.message.includes("Heartbeat") ||
-                event.message.includes("Working...") ||
-                event.message.includes("📡");
-              if (isHeartbeat) {
-                setSteps((prev) => {
-                  const rest = prev.filter(
-                    (s) =>
-                      !s.message.includes("Heartbeat") &&
-                      !s.message.includes("Working...") &&
-                      !s.message.includes("📡")
-                  );
-                  return [...rest, event];
-                });
-              } else {
-                setSteps((prev) => [...prev, event]);
-              }
-
-              if (event.type === "error") {
-                setError(event.message);
-              }
-
-              if (event.type === "done" && event.data?.leadsProcessed) {
-                leadsProcessed = event.data.leadsProcessed as number;
-              }
-            } catch {
-              // Skip malformed SSE data
+          if (statusData.done || statusData.status === "COMPLETED" || statusData.status === "FAILED") {
+            done = true;
+            leadsProcessed = statusData.output?.leadsProcessed || 0;
+            if (statusData.status === "FAILED") {
+              setError("Pipeline task failed. Please check logs.");
             }
           }
+        } catch (pollErr) {
+          console.error("Polling error:", pollErr);
         }
       }
 
@@ -120,10 +95,8 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
         onComplete(leadsProcessed, url);
         setUrl("");
       }
-    } catch (err: any) {
-      const isTimeout = err.name === "AbortError" || err.message?.includes("body stream");
-      const errorMessage = isTimeout ? "Connection timed out (Vercel limit). Try a smaller post or check your internet." : (err instanceof Error ? err.message : "Something went wrong");
-      
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Something went wrong";
       setError(errorMessage);
       setSteps((prev) => [
         ...prev,

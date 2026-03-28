@@ -70,10 +70,10 @@ export async function GET() {
         status: res.ok ? "✅ Connected" : `❌ HTTP ${res.status}`,
         detail: res.ok ? "Python service is alive" : "Service returned error",
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
       results.scraper_connection = {
         status: "❌ Connection failed",
-        detail: "Ensure the Python service is running on " + scraperUrl,
+        detail: error instanceof Error ? error.message : "Ensure the Python service is running on " + scraperUrl,
       };
     }
   }
@@ -91,10 +91,10 @@ export async function GET() {
         status: res.ok ? "✅ Connected" : `❌ HTTP ${res.status}`,
         detail: res.ok ? "Table accessible" : await res.text(),
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
       results.supabase_connection = {
         status: "❌ Connection failed",
-        detail: error?.message,
+        detail: (error as Error)?.message,
       };
     }
   }

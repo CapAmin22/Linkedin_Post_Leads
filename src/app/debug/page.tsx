@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function DebugPage() {
-  const [status, setStatus] = useState<any>(null);
+  const [status, setStatus] = useState<Record<string, { status: string; detail?: string }> | null>(null);
   const [loading, setLoading] = useState(true);
 
   const checkStatus = async () => {
@@ -13,15 +13,24 @@ export default function DebugPage() {
     try {
       const res = await fetch("/api/health");
       const data = await res.json();
-      setStatus(data);
-    } catch (e) {
-      setStatus({ error: "Failed to fetch health status" });
+      setStatus(data as Record<string, { status: string; detail?: string }>);
+    } catch (error: unknown) {
+      setStatus({ 
+        error: { 
+          status: "failed", 
+          detail: error instanceof Error ? error.message : "Failed to fetch health status" 
+        } 
+      });
     }
     setLoading(false);
   };
 
   useEffect(() => {
-    checkStatus();
+    let mounted = true;
+    if (mounted) {
+      checkStatus();
+    }
+    return () => { mounted = false; };
   }, []);
 
   return (
@@ -40,7 +49,7 @@ export default function DebugPage() {
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="grid grid-cols-1 gap-4">
-              {Object.entries(status).map(([key, val]: [string, any]) => (
+              {Object.entries(status).map(([key, val]: [string, { status: string; detail?: string }]) => (
                 <div key={key} className="flex items-center justify-between border-b pb-2 border-border/20 last:border-0 hover:bg-muted/30 px-2 py-1 rounded transition-colors">
                   <div className="font-medium text-sm capitalize">{key.replace(/_/g, ' ')}</div>
                   <div className="flex flex-col items-end">
@@ -53,7 +62,7 @@ export default function DebugPage() {
 
             {status.error && (
               <div className="p-4 bg-red-100 text-red-700 rounded-md text-sm">
-                Critical Error: {status.error}
+                Critical Error: {status.error.detail || status.error.status}
               </div>
             )}
             
