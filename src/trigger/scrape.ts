@@ -258,6 +258,12 @@ async function scrapeProfile(
     await page.goto(profileUrl, { waitUntil: "networkidle", timeout: 25000 });
     await page.waitForTimeout(2000);
 
+    // Resolve canonical URL — LinkedIn redirects /in/ACoAA... internal IDs to /in/username slugs
+    const resolvedUrl = page.url().split("?")[0].replace(/\/$/, "");
+    if (resolvedUrl.includes("/in/") && !resolvedUrl.includes("ACoA")) {
+      empty.linkedinUrl = resolvedUrl;
+    }
+
     // Headline / current role
     let jobTitle = "";
     for (const sel of [
@@ -319,10 +325,102 @@ async function scrapeProfile(
       /* no public email */
     }
 
-    return { linkedinUrl: profileUrl, jobTitle, company, companyUrl, email, fullName };
+    // Use resolved canonical URL if available, otherwise fall back to original
+    const canonicalUrl = page.url().split("?")[0].replace(/\/$/, "");
+    const finalUrl = (canonicalUrl.includes("/in/") && !canonicalUrl.includes("ACoA"))
+      ? canonicalUrl
+      : profileUrl;
+    return { linkedinUrl: finalUrl, jobTitle, company, companyUrl, email, fullName };
   } catch {
     return empty;
   }
+}
+
+// ─── Email enrichment: Apollo → Hunter ───────────────────────────────
+
+function splitName(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/);
+  return { firstName: parts[0] || "", lastName: parts.slice(1).join(" ") || "" };
+}
+
+async function enrichViaApollo(
+  firstName: string,
+  lastName: string,
+  company: string
+): Promise<string | null> {
+  const apiKey = process.env.APOLLO_API_KEY;
+  if (!apiKey || !firstName || !company) return null;
+  try {
+    const res = await fetch("https://api.apollo.io/v1/people/match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+      body: JSON.stringify({ api_key: apiKey, first_name: firstName, last_name: lastName, organization_name: company }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { person?: { email?: string } };
+    return data.person?.email || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getDomainViaHunter(company: string): Promise<string | null> {
+  const apiKey = process.env.HUNTER_API_KEY;
+  if (!apiKey || !company) return null;
+  try {
+    const params = new URLSearchParams({ company, api_key: apiKey, limit: "1" });
+    const res = await fetch(`https://api.hunter.io/v2/domain-search?${params}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { data?: { domain?: string } };
+    return data.data?.domain || null;
+  } catch {
+    return null;
+  }
+}
+
+async function enrichViaHunter(
+  firstName: string,
+  lastName: string,
+  domain: string
+): Promise<string | null> {
+  const apiKey = process.env.HUNTER_API_KEY;
+  if (!apiKey || !firstName || !domain) return null;
+  try {
+    const params = new URLSearchParams({ first_name: firstName, last_name: lastName, domain, api_key: apiKey });
+    const res = await fetch(`https://api.hunter.io/v2/email-finder?${params}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { data?: { email?: string } };
+    return data.data?.email || null;
+  } catch {
+    return null;
+  }
+}
+
+async function enrichLeadEmail(
+  fullName: string,
+  company: string
+): Promise<string | null> {
+  const { firstName, lastName } = splitName(fullName);
+
+  // Try Apollo first (works with company name alone — no domain needed)
+  const apolloEmail = await enrichViaApollo(firstName, lastName, company);
+  if (apolloEmail) return apolloEmail;
+
+  // Fall back to Hunter: resolve domain first, then find email
+  if (company) {
+    const domain = await getDomainViaHunter(company);
+    if (domain) {
+      const hunterEmail = await enrichViaHunter(firstName, lastName, domain);
+      if (hunterEmail) return hunterEmail;
+    }
+  }
+
+  return null;
 }
 
 // ─── Trigger.dev task ─────────────────────────────────────────────────
@@ -351,8 +449,10 @@ export const scrapeLinkedInPost = task({
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const linkedinEmail = process.env.NEXT_PUBLIC_LINKEDIN_EMAIL;
-    const linkedinPassword = process.env.NEXT_PUBLIC_LINKEDIN_PASSWORD;
+    const linkedinEmail =
+      process.env.NEXT_PUBLIC_LINKEDIN_EMAIL || process.env.LINKEDIN_EMAIL;
+    const linkedinPassword =
+      process.env.NEXT_PUBLIC_LINKEDIN_PASSWORD || process.env.LINKEDIN_PASSWORD;
     if (!linkedinEmail || !linkedinPassword) {
       emit({
         type: "error",
@@ -490,6 +590,27 @@ export const scrapeLinkedInPost = task({
       };
     });
 
+    // ── Step 4: Apollo + Hunter email enrichment ──────────────────────
+    const leadsNeedingEmail = enrichedLeads.filter((l) => !l.email && l.company);
+    if (leadsNeedingEmail.length > 0 && (process.env.APOLLO_API_KEY || process.env.HUNTER_API_KEY)) {
+      emit({
+        type: "step",
+        message: `📧 Step 4/4 — Enriching ${leadsNeedingEmail.length} email(s) via Apollo/Hunter...`,
+      });
+      let enriched = 0;
+      for (const lead of leadsNeedingEmail) {
+        const email = await enrichLeadEmail(lead.full_name, lead.company);
+        if (email) {
+          lead.email = email;
+          enriched++;
+        }
+      }
+      emit({
+        type: "step",
+        message: `✅ Apollo/Hunter found ${enriched} additional email(s)`,
+      });
+    }
+
     const emailCount = enrichedLeads.filter((l) => l.email).length;
     const companyCount = enrichedLeads.filter((l) => l.company).length;
 
@@ -498,16 +619,17 @@ export const scrapeLinkedInPost = task({
       message: `✅ ${enrichedLeads.length} leads — ${emailCount} emails · ${companyCount} companies`,
     });
 
-    // Save to Supabase
+    // Save to Supabase — upsert on (user_id, linkedin_url, source_url) to prevent duplicates
     emit({ type: "step", message: "💾 Saving to database..." });
     const { error } = await supabase
       .from("scraped_leads")
-      .insert(
+      .upsert(
         enrichedLeads.map((lead) => ({
           user_id: userId,
           source_url: url,
           ...lead,
-        }))
+        })),
+        { onConflict: "user_id,linkedin_url,source_url", ignoreDuplicates: false }
       );
 
     if (error) {

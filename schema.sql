@@ -33,6 +33,11 @@ WITH CHECK (auth.uid() = user_id);
 -- ALLOW Service Role to do everything (This is default in Supabase, but added for clarity)
 -- The background job uses SUPABASE_SERVICE_ROLE_KEY which bypasses RLS anyway.
 
+-- Unique constraint to prevent duplicate leads (same person from same post per user)
+ALTER TABLE scraped_leads
+  ADD CONSTRAINT uq_scraped_leads_user_linkedin_source
+  UNIQUE (user_id, linkedin_url, source_url);
+
 -- Index for performance
 CREATE INDEX IF NOT EXISTS idx_scraped_leads_user_id ON scraped_leads(user_id);
 CREATE INDEX IF NOT EXISTS idx_scraped_leads_job_id ON scraped_leads(job_id);

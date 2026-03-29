@@ -164,14 +164,23 @@ function fallbackRegexParse(headline: string): ParsedTitle {
 // ─── AI Parsing: Groq → Gemini → OpenAI → Regex ──────────────────────
 
 function buildPrompt(headlines: string): string {
-  return `Extract "Job Title" and "Company Name" from LinkedIn headlines.
-Return JSON: {"results": [{"index": N, "jobTitle": "...", "company": "..."}]}
+  return `Extract the professional "Job Title" and "Company Name" from LinkedIn profile headlines.
+Return ONLY valid JSON: {"results": [{"index": N, "jobTitle": "...", "company": "..."}]}
 
 Rules:
-- Extract ONLY the role name (e.g. "Founder", "Software Engineer").
-- Use "@", "at", "|", "-" as separators to find company.
-- If no clear company, set company to "".
-- index must match input numbering exactly.
+1. jobTitle must be a SHORT role/title only (e.g. "Founder & CEO", "Software Engineer", "VP of Sales").
+2. Many headlines start with a personal pitch before the actual title — SKIP the pitch, extract the title.
+3. Use separators "@", "at", "|", "-", "," to identify company name.
+4. Emojis are NOT part of the title — strip them.
+5. If no company is identifiable, set company to "".
+6. index must match input numbering exactly.
+
+Examples:
+- "I help founders grow revenue | CEO @ Acme Corp" → jobTitle: "CEO", company: "Acme Corp"
+- "Helping startups scale with AI - CTO at TechCo" → jobTitle: "CTO", company: "TechCo"
+- "Software Engineer | Google" → jobTitle: "Software Engineer", company: "Google"
+- "🚀 Founder building the future of SaaS | OpenAI" → jobTitle: "Founder", company: "OpenAI"
+- "Marketing consultant & speaker" → jobTitle: "Marketing Consultant", company: ""
 
 Headlines:
 ${headlines}`;

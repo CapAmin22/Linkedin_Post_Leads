@@ -45,7 +45,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
         router.push("/dashboard");
         router.refresh();
       } else {
-        const { error } = await supabase.auth.signUp({
+        const { data: signUpData, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
@@ -53,7 +53,14 @@ export default function AuthForm({ mode }: AuthFormProps) {
           },
         });
         if (error) throw error;
-        setMessage("Check your email for a confirmation link.");
+        // If Supabase email confirmation is disabled the session is returned
+        // immediately — redirect straight to dashboard.
+        if (signUpData.session) {
+          router.push("/dashboard");
+          router.refresh();
+        } else {
+          setMessage("Check your email for a confirmation link.");
+        }
       }
     } catch (err: unknown) {
       const errorMessage =

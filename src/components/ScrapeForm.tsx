@@ -226,8 +226,8 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
           </div>
         )}
 
-        {/* Error summary (only if NOT already in steps) */}
-        {error && steps.length === 0 && (
+        {/* Error banner — always shown when an error is set */}
+        {error && (
           <div className="mt-3 rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
             {error}
           </div>

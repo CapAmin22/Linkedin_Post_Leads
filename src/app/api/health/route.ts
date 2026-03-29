@@ -47,36 +47,22 @@ export async function GET() {
       : "❌ No AI key set!",
   };
 
-  // 5. Scraper Service
-  const scraperUrl = process.env.NEXT_PUBLIC_SCRAPER_SERVICE_URL;
-  const linkedinEmail = process.env.LINKEDIN_EMAIL;
-  const linkedinPassword = process.env.LINKEDIN_PASSWORD;
-
-  results.scraper_service = {
-    status: scraperUrl ? "✅ Set" : "❌ Missing (Python service required)",
-    detail: scraperUrl || undefined,
+  // 5. Trigger.dev (background task runner)
+  const triggerKey = process.env.TRIGGER_SECRET_KEY;
+  results.trigger_dev = {
+    status: triggerKey ? "✅ Set" : "❌ Missing (required for background scraping jobs)",
   };
+
+  // 6. LinkedIn scraper credentials
+  // Support both NEXT_PUBLIC_ prefix (used by Trigger.dev task) and plain variant as fallback
+  const linkedinEmail =
+    process.env.NEXT_PUBLIC_LINKEDIN_EMAIL || process.env.LINKEDIN_EMAIL;
+  const linkedinPassword =
+    process.env.NEXT_PUBLIC_LINKEDIN_PASSWORD || process.env.LINKEDIN_PASSWORD;
+
   results.scraper_credentials = {
     status: linkedinEmail && linkedinPassword ? "✅ Set" : "❌ Missing",
   };
-
-  // 8. Quick Scraper connection test
-  if (scraperUrl) {
-    try {
-      const res = await fetch(`${scraperUrl.replace(/\/$/, "")}/health`, {
-        signal: AbortSignal.timeout(3000),
-      });
-      results.scraper_connection = {
-        status: res.ok ? "✅ Connected" : `❌ HTTP ${res.status}`,
-        detail: res.ok ? "Python service is alive" : "Service returned error",
-      };
-    } catch (error: unknown) {
-      results.scraper_connection = {
-        status: "❌ Connection failed",
-        detail: error instanceof Error ? error.message : "Ensure the Python service is running on " + scraperUrl,
-      };
-    }
-  }
 
   // 9. Quick Supabase connection test
   if (supabaseUrl && supabaseAnonKey?.startsWith("eyJ")) {
