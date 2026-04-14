@@ -2,8 +2,8 @@
  * Trigger.dev background task: LinkedIn post → enriched leads.
  *
  * Architecture:
- *   1. Launch headless Chromium (Playwright) with anti-detection
- *   2. Login to LinkedIn (LINKEDIN_EMAIL / LINKEDIN_PASSWORD env vars)
+ *   1. Launch headless Chromium via PinchTab HTTP API
+ *   2. Login to LinkedIn (LINKEDIN_EMAIL / LINKEDIN_PASSWORD config)
  *   3. Scrape reactors from the post (scroll modal, collect up to `limit`)
  *   4. Deep-dive each profile page (job title, company, contact email)
  *   5. Fill gaps via LLM waterfall (Groq → Gemini → OpenAI → Regex)
@@ -11,7 +11,6 @@
  *   7. Emit progress events via task metadata (polled by the SSE route)
  */
 import { task, metadata as taskMeta, logger } from "@trigger.dev/sdk/v3";
-import { chromium, type Browser, type Page, type Locator } from "playwright";
 import { createClient } from "@supabase/supabase-js";
 import {
   normalizeProfiles,
@@ -20,75 +19,132 @@ import {
   type ParsedTitle,
 } from "@/lib/pipeline";
 
-// ─── LinkedIn scraper constants ───────────────────────────────────────
+// ─── PinchTab HTTP Client (Official API) ────────────────────────────────
 
-const BTN_SELECTORS = [
-  "button.social-details-social-counts__count-value",
-  ".social-details-social-counts__count-value",
-  "button[aria-label*='reaction']",
-  "button[aria-label*='like']",
-  "button[aria-label*='Like']",
-  "[data-test-id*='social-counts'] button",
-];
+class PinchTabAPI {
+  baseUrl: string;
+  instanceId: string = "";
+  tabId: string = "";
 
-const MODAL_SELECTORS = [
-  ".artdeco-modal__content",
-  ".social-details-reactors-modal",
-  ".reactions-tabpanel",
-  "[class*='reactions-modal']",
-  "[class*='reactor-list']",
-  ".scaffold-finite-scroll__content",
-];
+  constructor() {
+    this.baseUrl = (process.env.PINCHTAB_URL || "http://localhost:9867").replace(/\/$/, "");
+  }
 
-// ─── Browser factory ──────────────────────────────────────────────────
+  private async request(method: string, path: string, body?: unknown) {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
 
-async function createBrowser(): Promise<Browser> {
-  return chromium.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-blink-features=AutomationControlled",
-      "--disable-features=IsolateOrigins,site-per-process",
-    ],
-  });
-}
+    if (!res.ok) {
+      throw new Error(`PinchTab ${method} ${path} failed: ${res.status} ${await res.text()}`);
+    }
 
-async function newStealthPage(browser: Browser): Promise<Page> {
-  const ctx = await browser.newContext({
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    viewport: { width: 1280, height: 800 },
-    javaScriptEnabled: true,
-    locale: "en-US",
-    timezoneId: "America/New_York",
-  });
-  // Hide webdriver + other automation signals
-  await ctx.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    (window as unknown as Record<string, unknown>).chrome = { runtime: {} };
-  });
-  return ctx.newPage();
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
+  }
+
+  async init(profileId: string = "leadharvest") {
+    // Ensure profile exists (ignore if already created)
+    try {
+      await this.request("POST", "/profiles", { name: profileId });
+    } catch { /* profile may already exist */ }
+
+    const data = await this.request("POST", "/instances/start", {
+      profileId,
+      mode: "headless",
+    });
+    this.instanceId = data.id || data.instanceId;
+    if (!this.instanceId) {
+      throw new Error(`Invalid PinchTab response: ${JSON.stringify(data)}`);
+    }
+  }
+
+  /** Open a new tab and navigate to url. Sets this.tabId. */
+  async openTab(url: string): Promise<string> {
+    const data = await this.request(
+      "POST",
+      `/instances/${this.instanceId}/tabs/open`,
+      { url }
+    );
+    this.tabId = data.tabId || data.id;
+    return this.tabId;
+  }
+
+  /** Execute JavaScript in the current tab via POST /tabs/{tabId}/eval */
+  async eval<T>(expression: string): Promise<T> {
+    const data = await this.request("POST", `/tabs/${this.tabId}/eval`, {
+      expression,
+    });
+    return data && data.value !== undefined ? data.value : data;
+  }
+
+  /** Get accessibility snapshot of the current tab */
+  async snapshot(filter?: string) {
+    const qs = filter ? `?filter=${filter}` : "";
+    return this.request("GET", `/tabs/${this.tabId}/snapshot${qs}`);
+  }
+
+  /** Perform a browser action (click, fill, type, press, hover) */
+  async action(kind: string, ref: string, options?: Record<string, unknown>) {
+    return this.request("POST", `/tabs/${this.tabId}/action`, {
+      kind,
+      ref,
+      ...options,
+    });
+  }
+
+  /** Extract page text */
+  async getText(): Promise<string> {
+    const data = await this.request("GET", `/tabs/${this.tabId}/text`);
+    return typeof data === "string" ? data : data.text || data.content || "";
+  }
+
+  async close() {
+    if (this.instanceId) {
+      try {
+        await this.request("POST", `/instances/${this.instanceId}/stop`);
+      } catch { /* ignore close failures */ }
+    }
+  }
+
+  async wait(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
 }
 
 // ─── Login ────────────────────────────────────────────────────────────
 
 async function loginLinkedIn(
-  page: Page,
+  pinchtab: PinchTabAPI,
   email: string,
   password: string
-): Promise<void> {
-  await page.goto("https://www.linkedin.com/login", {
-    waitUntil: "networkidle",
-    timeout: 30000,
-  });
-  await page.fill("#username", email);
-  await page.fill("#password", password);
-  await page.click("[type=submit]");
-  await page.waitForURL(/linkedin\.com\/(feed|in\/|check\/|mynetwork)/, {
-    timeout: 20000,
-  });
+): Promise<boolean> {
+  await pinchtab.openTab("https://www.linkedin.com/login");
+  await pinchtab.wait(2000);
+
+  // Check if we are already logged in (profile persistence)
+  const isLogged = await pinchtab.eval<boolean>(
+    `window.location.href.includes('feed') || window.location.href.includes('mynetwork')`
+  );
+  if (isLogged) return true;
+
+  // Perform login via eval (most reliable for LinkedIn's dynamic login form)
+  await pinchtab.eval(`
+    (() => {
+      const u = document.querySelector('#username');
+      const p = document.querySelector('#password');
+      if (u) u.value = '${email}';
+      if (p) p.value = '${password.replace(/'/g, "\\'")}';
+      const btn = document.querySelector('[type=submit]');
+      if (btn) btn.click();
+    })()
+  `);
+
+  await pinchtab.wait(5000);
+  const currentUrl = await pinchtab.eval<string>(`window.location.href`);
+  return currentUrl.includes('feed') || currentUrl.includes('mynetwork') || currentUrl.includes('check');
 }
 
 // ─── Reaction scraping ────────────────────────────────────────────────
@@ -100,117 +156,82 @@ interface Reactor {
   reactionType: string;
 }
 
-async function tryClickButton(page: Page): Promise<boolean> {
-  for (const sel of BTN_SELECTORS) {
-    try {
-      await page.click(sel, { timeout: 4000 });
-      return true;
-    } catch {
-      /* try next */
-    }
-  }
-  // Fallback: any button whose text is a number
-  const btns = await page.$$("button");
-  for (const btn of btns) {
-    const txt = ((await btn.textContent()) || "").trim().replace(/,/g, "");
-    if (/^\d+$/.test(txt)) {
-      await btn.click();
-      return true;
-    }
-  }
-  return false;
-}
-
-async function findModal(page: Page): Promise<Locator | null> {
-  for (const sel of MODAL_SELECTORS) {
-    try {
-      await page.waitForSelector(sel, { timeout: 6000 });
-      return page.locator(sel).first();
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
-}
-
 async function scrapeReactions(
-  page: Page,
+  pinchtab: PinchTabAPI,
   postUrl: string,
   limit: number
 ): Promise<Reactor[]> {
-  await page.goto(postUrl, { waitUntil: "networkidle", timeout: 30000 });
-  await page.waitForTimeout(3000);
+  await pinchtab.openTab(postUrl);
+  await pinchtab.wait(4000);
 
-  const clicked = await tryClickButton(page);
-  if (!clicked) return [];
+  // Try clicking reaction buttons
+  const buttonClicked = await pinchtab.eval<boolean>(`
+    (() => {
+      const selectors = [
+        "button.social-details-social-counts__count-value",
+        ".social-details-social-counts__count-value",
+        "button[aria-label*='reaction']",
+        "button[aria-label*='like']",
+        "button[aria-label*='Like']",
+        "[data-test-id*='social-counts'] button"
+      ];
+      for (const sel of selectors) {
+        const btn = document.querySelector(sel);
+        if (btn) { btn.click(); return true; }
+      }
+      const btns = document.querySelectorAll("button");
+      for (const btn of btns) {
+        const txt = (btn.textContent || "").trim().replace(/,/g, "");
+        if (/^\\d+$/.test(txt)) { btn.click(); return true; }
+      }
+      return false;
+    })()
+  `);
 
-  await page.waitForTimeout(2000);
-
-  const modal = await findModal(page);
-  if (!modal) return [];
+  if (!buttonClicked) return [];
+  await pinchtab.wait(2000);
 
   const reactors: Reactor[] = [];
   const seen = new Set<string>();
   let stale = 0;
 
   for (let scroll = 0; scroll < 25 && reactors.length < limit; scroll++) {
-    const rows = modal.locator(".artdeco-list__item");
-    const count = await rows.count();
+    // Extract current visible reactors
+    const batch = await pinchtab.eval<Reactor[]>(`
+      (() => {
+        const rows = document.querySelectorAll('.artdeco-list__item');
+        const items = [];
+        for (const row of rows) {
+          let name = "";
+          for (const sel of [".artdeco-entity-lockup__title span[aria-hidden='true']", ".artdeco-entity-lockup__title", ".lockup__title span"]) {
+            const el = row.querySelector(sel);
+            if (el && el.textContent) { name = el.textContent.trim(); break; }
+          }
+          let headline = "";
+          for (const sel of [".artdeco-entity-lockup__subtitle span[aria-hidden='true']", ".artdeco-entity-lockup__subtitle"]) {
+            const el = row.querySelector(sel);
+            if (el && el.textContent) { headline = el.textContent.trim(); break; }
+          }
+          let profileUrl = "";
+          const a = row.querySelector("a[href*='/in/']");
+          if (a) {
+            profileUrl = a.getAttribute("href").split("?")[0].replace(/\\/$/, "");
+          }
+          if (name && profileUrl) {
+            items.push({ fullName: name, headline, profileUrl, reactionType: "" });
+          }
+        }
+        return items;
+      })()
+    `);
+
     let added = 0;
-
-    for (let i = 0; i < count && reactors.length < limit; i++) {
-      const row = rows.nth(i);
-
-      let name = "";
-      for (const sel of [
-        ".artdeco-entity-lockup__title span[aria-hidden='true']",
-        ".artdeco-entity-lockup__title",
-        ".lockup__title span",
-        "span[aria-hidden='true']",
-      ]) {
-        try {
-          name = (
-            (await row.locator(sel).first().textContent({ timeout: 400 })) ||
-            ""
-          ).trim();
-          if (name) break;
-        } catch {
-          /* try next */
-        }
-      }
-
-      let headline = "";
-      for (const sel of [
-        ".artdeco-entity-lockup__subtitle span[aria-hidden='true']",
-        ".artdeco-entity-lockup__subtitle",
-        ".lockup__subtitle span",
-      ]) {
-        try {
-          headline = (
-            (await row.locator(sel).first().textContent({ timeout: 400 })) ||
-            ""
-          ).trim();
-          if (headline) break;
-        } catch {
-          /* try next */
-        }
-      }
-
-      let profileUrl = "";
-      try {
-        const href = await row
-          .locator("a[href*='/in/']")
-          .first()
-          .getAttribute("href", { timeout: 400 });
-        profileUrl = (href || "").split("?")[0].replace(/\/$/, "");
-      } catch {
-        /* skip */
-      }
-
-      if (name && profileUrl && !seen.has(profileUrl)) {
-        seen.add(profileUrl);
-        reactors.push({ fullName: name, headline, profileUrl, reactionType: "" });
+    for (const r of (batch || [])) {
+      if (!seen.has(r.profileUrl)) {
+        seen.add(r.profileUrl);
+        reactors.push(r);
         added++;
+        if (reactors.length >= limit) break;
       }
     }
 
@@ -221,10 +242,16 @@ async function scrapeReactions(
       stale = 0;
     }
 
-    await modal.evaluate((el) => {
-      el.scrollTop += 600;
-    });
-    await page.waitForTimeout(1500);
+    // Scroll modal down
+    await pinchtab.eval(`
+      (() => {
+        for (const sel of [".artdeco-modal__content", ".social-details-reactors-modal", ".reactions-tabpanel", ".scaffold-finite-scroll__content"]) {
+          const el = document.querySelector(sel);
+          if (el) { el.scrollTop += 600; return; }
+        }
+      })()
+    `);
+    await pinchtab.wait(1500);
   }
 
   return reactors.slice(0, limit);
@@ -242,7 +269,7 @@ interface ProfileData {
 }
 
 async function scrapeProfile(
-  page: Page,
+  pinchtab: PinchTabAPI,
   profileUrl: string,
   fullName: string
 ): Promise<ProfileData> {
@@ -254,83 +281,71 @@ async function scrapeProfile(
     email: "",
     fullName,
   };
+
   try {
-    await page.goto(profileUrl, { waitUntil: "networkidle", timeout: 25000 });
-    await page.waitForTimeout(2000);
+    await pinchtab.openTab(profileUrl);
+    await pinchtab.wait(3000);
 
-    // Resolve canonical URL — LinkedIn redirects /in/ACoAA... internal IDs to /in/username slugs
-    const resolvedUrl = page.url().split("?")[0].replace(/\/$/, "");
-    if (resolvedUrl.includes("/in/") && !resolvedUrl.includes("ACoA")) {
-      empty.linkedinUrl = resolvedUrl;
-    }
+    const data = await pinchtab.eval<Partial<ProfileData & { currentUrl: string }>>(`
+      (() => {
+        let jobTitle = "";
+        for (const sel of [".text-body-medium.break-words", ".pv-text-details__left-panel .text-body-medium", "h2.mt1"]) {
+          const el = document.querySelector(sel);
+          if (el && el.textContent) { jobTitle = el.textContent.trim(); break; }
+        }
 
-    // Headline / current role
-    let jobTitle = "";
-    for (const sel of [
-      ".text-body-medium.break-words",
-      ".pv-text-details__left-panel .text-body-medium",
-      "h2.mt1",
-    ]) {
-      try {
-        jobTitle = (
-          (await page.locator(sel).first().textContent({ timeout: 2000 })) || ""
-        ).trim();
-        if (jobTitle) break;
-      } catch {
-        /* try next */
-      }
-    }
+        let company = "";
+        let companyUrl = "";
+        try {
+          const expSection = document.querySelector("#experience")?.parentElement;
+          if (expSection) {
+            const firstItem = expSection.querySelector(".pvs-list__paged-list-item");
+            if (firstItem) {
+              const compEl = firstItem.querySelector(".t-bold span[aria-hidden='true']");
+              if (compEl) company = compEl.textContent.trim();
 
-    // Company from experience section
-    let company = "";
-    let companyUrl = "";
-    try {
-      const expSection = page.locator("#experience").locator("..");
-      const firstItem = expSection
-        .locator(".pvs-list__paged-list-item")
-        .first();
-      company = (
-        (await firstItem
-          .locator(".t-bold span[aria-hidden='true']")
-          .first()
-          .textContent({ timeout: 2000 })) || ""
-      ).trim();
-      const href = await firstItem
-        .locator("a[href*='/company/']")
-        .first()
-        .getAttribute("href", { timeout: 2000 });
-      if (href) {
-        companyUrl = `https://linkedin.com${href.split("?")[0]}`;
-      }
-    } catch {
-      /* no experience section */
-    }
+              const a = firstItem.querySelector("a[href*='/company/']");
+              if (a) companyUrl = "https://linkedin.com" + a.getAttribute("href").split("?")[0];
+            }
+          }
+        } catch {}
 
-    // Email via contact-info overlay
+        return { jobTitle, company, companyUrl, currentUrl: window.location.href };
+      })()
+    `);
+
+    // Fetch email via contact-info overlay
     let email = "";
     try {
-      await page
-        .locator("a[href*='/overlay/contact-info/']")
-        .first()
-        .click({ timeout: 3000 });
-      await page.waitForTimeout(1000);
-      const emailHref = await page
-        .locator("a[href^='mailto:']")
-        .first()
-        .getAttribute("href", { timeout: 2000 });
-      email = (emailHref || "").replace("mailto:", "").trim();
-      await page.keyboard.press("Escape");
-      await page.waitForTimeout(500);
-    } catch {
-      /* no public email */
-    }
+      await pinchtab.eval(`
+        (() => {
+          const a = document.querySelector("a[href*='/overlay/contact-info/']");
+          if (a) a.click();
+        })()
+      `);
+      await pinchtab.wait(1500);
+      email = await pinchtab.eval<string>(`
+        (() => {
+          const e = document.querySelector("a[href^='mailto:']");
+          if (e) return e.getAttribute("href").replace("mailto:", "").trim();
+          return "";
+        })()
+      `);
+    } catch { /* contact info may not be available */ }
 
-    // Use resolved canonical URL if available, otherwise fall back to original
-    const canonicalUrl = page.url().split("?")[0].replace(/\/$/, "");
-    const finalUrl = (canonicalUrl.includes("/in/") && !canonicalUrl.includes("ACoA"))
-      ? canonicalUrl
+    const resolvedUrl = data?.currentUrl || profileUrl;
+    const finalUrl = (resolvedUrl.includes("/in/") && !resolvedUrl.includes("ACoA"))
+      ? resolvedUrl.split("?")[0].replace(/\/$/, "")
       : profileUrl;
-    return { linkedinUrl: finalUrl, jobTitle, company, companyUrl, email, fullName };
+
+    return {
+      linkedinUrl: finalUrl,
+      jobTitle: data?.jobTitle || "",
+      company: data?.company || "",
+      companyUrl: data?.companyUrl || "",
+      email: email || "",
+      fullName,
+    };
   } catch {
     return empty;
   }
@@ -343,11 +358,7 @@ function splitName(fullName: string): { firstName: string; lastName: string } {
   return { firstName: parts[0] || "", lastName: parts.slice(1).join(" ") || "" };
 }
 
-async function enrichViaApollo(
-  firstName: string,
-  lastName: string,
-  company: string
-): Promise<string | null> {
+async function enrichViaApollo(firstName: string, lastName: string, company: string): Promise<string | null> {
   const apiKey = process.env.APOLLO_API_KEY;
   if (!apiKey || !firstName || !company) return null;
   try {
@@ -370,9 +381,7 @@ async function getDomainViaHunter(company: string): Promise<string | null> {
   if (!apiKey || !company) return null;
   try {
     const params = new URLSearchParams({ company, api_key: apiKey, limit: "1" });
-    const res = await fetch(`https://api.hunter.io/v2/domain-search?${params}`, {
-      signal: AbortSignal.timeout(8000),
-    });
+    const res = await fetch(`https://api.hunter.io/v2/domain-search?${params}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const data = (await res.json()) as { data?: { domain?: string } };
     return data.data?.domain || null;
@@ -381,18 +390,12 @@ async function getDomainViaHunter(company: string): Promise<string | null> {
   }
 }
 
-async function enrichViaHunter(
-  firstName: string,
-  lastName: string,
-  domain: string
-): Promise<string | null> {
+async function enrichViaHunter(firstName: string, lastName: string, domain: string): Promise<string | null> {
   const apiKey = process.env.HUNTER_API_KEY;
   if (!apiKey || !firstName || !domain) return null;
   try {
     const params = new URLSearchParams({ first_name: firstName, last_name: lastName, domain, api_key: apiKey });
-    const res = await fetch(`https://api.hunter.io/v2/email-finder?${params}`, {
-      signal: AbortSignal.timeout(8000),
-    });
+    const res = await fetch(`https://api.hunter.io/v2/email-finder?${params}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const data = (await res.json()) as { data?: { email?: string } };
     return data.data?.email || null;
@@ -401,17 +404,11 @@ async function enrichViaHunter(
   }
 }
 
-async function enrichLeadEmail(
-  fullName: string,
-  company: string
-): Promise<string | null> {
+async function enrichLeadEmail(fullName: string, company: string): Promise<string | null> {
   const { firstName, lastName } = splitName(fullName);
-
-  // Try Apollo first (works with company name alone — no domain needed)
   const apolloEmail = await enrichViaApollo(firstName, lastName, company);
   if (apolloEmail) return apolloEmail;
 
-  // Fall back to Hunter: resolve domain first, then find email
   if (company) {
     const domain = await getDomainViaHunter(company);
     if (domain) {
@@ -419,7 +416,6 @@ async function enrichLeadEmail(
       if (hunterEmail) return hunterEmail;
     }
   }
-
   return null;
 }
 
@@ -432,15 +428,10 @@ export const scrapeLinkedInPost = task({
   run: async (payload: { url: string; userId: string; limit?: number }) => {
     const { url, userId, limit = 20 } = payload;
 
-    // Event bus: accumulates all progress events; SSE route polls these
     const events: PipelineEvent[] = [];
     const emit = (event: PipelineEvent) => {
       events.push(event);
-      // Fire-and-forget — flush is best-effort for real-time progress
-      taskMeta
-        .set("events", events as never)
-        .flush()
-        .catch(() => {});
+      taskMeta.set("events", events as never).flush().catch(() => {});
       logger.info(event.message);
     };
 
@@ -449,44 +440,47 @@ export const scrapeLinkedInPost = task({
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const linkedinEmail =
-      process.env.NEXT_PUBLIC_LINKEDIN_EMAIL || process.env.LINKEDIN_EMAIL;
-    const linkedinPassword =
-      process.env.NEXT_PUBLIC_LINKEDIN_PASSWORD || process.env.LINKEDIN_PASSWORD;
+    const linkedinEmail = process.env.NEXT_PUBLIC_LINKEDIN_EMAIL || process.env.LINKEDIN_EMAIL;
+    const linkedinPassword = process.env.NEXT_PUBLIC_LINKEDIN_PASSWORD || process.env.LINKEDIN_PASSWORD;
     if (!linkedinEmail || !linkedinPassword) {
       emit({
         type: "error",
-        message:
-          "❌ LINKEDIN_EMAIL / LINKEDIN_PASSWORD not set in environment variables",
+        message: "❌ LINKEDIN_EMAIL / LINKEDIN_PASSWORD not set in environment variables",
       });
       await taskMeta.set("done" as never, true as never).flush();
       return;
     }
 
-    // ── Step 1: Scrape reactions ──────────────────────────────────────
-    emit({ type: "step", message: "🔍 Step 1/3 — Launching browser..." });
+    emit({ type: "step", message: "🔍 Step 1/3 — Launching browser via PinchTab..." });
 
+    const pinchtab = new PinchTabAPI();
     let reactors: Reactor[] = [];
     const profileMap = new Map<string, ProfileData>();
-    const browser = await createBrowser();
 
     try {
-      const page = await newStealthPage(browser);
-
-      emit({ type: "step", message: "🔑 Logging in to LinkedIn..." });
       try {
-        await loginLinkedIn(page, linkedinEmail, linkedinPassword);
+        await pinchtab.init("leadharvest");
+      } catch (e: unknown) {
+        emit({ type: "error", message: `❌ Failed connecting to PinchTab: ${(e as Error)?.message}`});
+        await taskMeta.set("done" as never, true as never).flush();
+        return;
+      }
+
+      emit({ type: "step", message: "🔑 Checking LinkedIn Session..." });
+      try {
+        const authed = await loginLinkedIn(pinchtab, linkedinEmail, linkedinPassword);
+        if (!authed) throw new Error("Could not confirm login status");
         emit({ type: "step", message: "✅ Logged in" });
       } catch (err: unknown) {
         emit({
           type: "error",
-          message: `❌ Login failed: ${(err as Error)?.message}. Check LINKEDIN_EMAIL / LINKEDIN_PASSWORD.`,
+          message: `❌ Login failed: ${(err as Error)?.message}.`,
         });
         return;
       }
 
       emit({ type: "step", message: `🔎 Navigating to post...` });
-      reactors = await scrapeReactions(page, url, limit);
+      reactors = await scrapeReactions(pinchtab, url, limit);
       emit({
         type: "step",
         message: `📋 Found ${reactors.length} reactor(s)`,
@@ -511,7 +505,7 @@ export const scrapeLinkedInPost = task({
       for (let i = 0; i < reactors.length; i++) {
         const reactor = reactors[i];
         if (!reactor.profileUrl.startsWith("http")) continue;
-        const data = await scrapeProfile(page, reactor.profileUrl, reactor.fullName);
+        const data = await scrapeProfile(pinchtab, reactor.profileUrl, reactor.fullName);
         profileMap.set(reactor.profileUrl.replace(/\/$/, ""), data);
         if ((i + 1) % 5 === 0 || i === reactors.length - 1) {
           emit({
@@ -526,14 +520,13 @@ export const scrapeLinkedInPost = task({
         message: `✅ ${profileMap.size} profiles enriched`,
       });
     } finally {
-      await browser.close();
+      await pinchtab.close();
     }
 
     // ── Step 3: LLM parsing ───────────────────────────────────────────
     const normalized = normalizeProfiles(reactors as unknown as Record<string, unknown>[], emit);
     const parsedTitles = new Map<number, ParsedTitle>();
 
-    // Pre-fill from Playwright profile data
     normalized.forEach((p, i) => {
       const cleanUrl = p.linkedinUrl.split("?")[0].replace(/\/$/, "").toLowerCase();
       for (const [k, v] of profileMap) {
@@ -619,7 +612,6 @@ export const scrapeLinkedInPost = task({
       message: `✅ ${enrichedLeads.length} leads — ${emailCount} emails · ${companyCount} companies`,
     });
 
-    // Save to Supabase — upsert on (user_id, linkedin_url, source_url) to prevent duplicates
     emit({ type: "step", message: "💾 Saving to database..." });
     const { error } = await supabase
       .from("scraped_leads")
