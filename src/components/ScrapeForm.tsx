@@ -52,7 +52,9 @@ export default function ScrapeForm({ onComplete }: ScrapeFormProps) {
 
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || data.details || "Failed to start pipeline");
+        // Show the details message when available — it contains actionable guidance
+        const msg = data.details || data.error || "Failed to start pipeline";
+        throw new Error(msg);
       }
 
       const jobId = data.jobId;

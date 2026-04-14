@@ -7,10 +7,13 @@ import LeadsTable from "@/components/LeadsTable";
 
 export default function DashboardPage() {
   const [refreshKey, setRefreshKey] = useState(0);
+  // Track the source URL of the most recently completed scrape
+  const [latestSourceUrl, setLatestSourceUrl] = useState<string | null>(null);
 
-  // Called when a scrape completes — increment refreshKey to re-fetch leads
-  const handleComplete = useCallback((leadsProcessed: number, _url: string) => {
+  // Called when a scrape completes — store URL and re-fetch leads
+  const handleComplete = useCallback((leadsProcessed: number, url: string) => {
     if (leadsProcessed > 0) {
+      setLatestSourceUrl(url);
       setRefreshKey((k) => k + 1);
     }
   }, []);
@@ -30,8 +33,8 @@ export default function DashboardPage() {
         {/* Scrape form — always visible */}
         <ScrapeForm onComplete={handleComplete} />
 
-        {/* Leads table — always visible, shows all user leads */}
-        <LeadsTable refreshKey={refreshKey} />
+        {/* Leads table — shows the latest scrape by default, all history accessible via dropdown */}
+        <LeadsTable refreshKey={refreshKey} latestSourceUrl={latestSourceUrl} />
       </main>
     </div>
   );

@@ -128,7 +128,13 @@ function StatCard({
 
 // ─── Component ────────────────────────────────────────────────────────
 
-export default function LeadsTable({ refreshKey }: { refreshKey: number }) {
+export default function LeadsTable({
+  refreshKey,
+  latestSourceUrl,
+}: {
+  refreshKey: number;
+  latestSourceUrl?: string | null;
+}) {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -143,6 +149,16 @@ export default function LeadsTable({ refreshKey }: { refreshKey: number }) {
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id ?? null));
   }, [supabase]);
+
+  // ── Auto-select the latest scrape URL when a new scrape completes ──
+
+  useEffect(() => {
+    if (latestSourceUrl) {
+      setSourceFilter(latestSourceUrl);
+      setSearch("");
+      setPage(1);
+    }
+  }, [latestSourceUrl, refreshKey]);
 
   // ── Fetch leads for the current user only ─────────────────────────
 
@@ -272,9 +288,9 @@ export default function LeadsTable({ refreshKey }: { refreshKey: number }) {
                   ? "Loading..."
                   : leads.length === 0
                   ? "No leads yet — paste a LinkedIn URL above to get started."
-                  : filtered.length < leads.length
-                  ? `${filtered.length} of ${leads.length} leads`
-                  : `${leads.length} lead${leads.length !== 1 ? "s" : ""} total`}
+                  : sourceFilter !== "all"
+                  ? `Showing ${filtered.length} lead${filtered.length !== 1 ? "s" : ""} from latest scrape`
+                  : `${leads.length} lead${leads.length !== 1 ? "s" : ""} total across all scrapes`}
               </CardDescription>
             </div>
 
@@ -337,7 +353,7 @@ export default function LeadsTable({ refreshKey }: { refreshKey: number }) {
                 />
               </div>
 
-              {sourceUrls.length > 1 && (
+              {sourceUrls.length > 0 && (
                 <select
                   value={sourceFilter}
                   onChange={(e) => setSourceFilter(e.target.value)}
