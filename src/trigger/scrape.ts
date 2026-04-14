@@ -19,69 +19,96 @@ import {
   type ParsedTitle,
 } from "@/lib/pipeline";
 
-// ─── PinchTab HTTP Client ───────────────────────────────────────────────
+// ─── PinchTab HTTP Client (Official API) ────────────────────────────────
 
 class PinchTabAPI {
   baseUrl: string;
   instanceId: string = "";
+  tabId: string = "";
 
   constructor() {
     this.baseUrl = (process.env.PINCHTAB_URL || "http://localhost:9867").replace(/\/$/, "");
   }
 
-  async init(profileId: string = "leadharvest") {
-    // Attempt to start instances via POST /instances/start
-    const res = await fetch(`${this.baseUrl}/instances/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profileId, mode: "headless" }),
-    });
-    
-    if (!res.ok) {
-      throw new Error(`Failed to start PinchTab instance: ${res.status} ${await res.text()}`);
-    }
-    
-    const data = await res.json();
-    // Accommodate possible API return structures
-    this.instanceId = data.id || data.instanceId || (data.instance && data.instance.id);
-    if (!this.instanceId) {
-      throw new Error(`Invalid response starting PinchTab: ${JSON.stringify(data)}`);
-    }
-  }
-
-  async request(method: string, path: string, body?: any) {
-    const res = await fetch(`${this.baseUrl}/instances/${this.instanceId}${path}`, {
+  private async request(method: string, path: string, body?: unknown) {
+    const res = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: body ? { "Content-Type": "application/json" } : {},
       body: body ? JSON.stringify(body) : undefined,
     });
-    
+
     if (!res.ok) {
-      throw new Error(`PinchTab ${path} failed: ${res.status} ${await res.text()}`);
+      throw new Error(`PinchTab ${method} ${path} failed: ${res.status} ${await res.text()}`);
     }
-    
-    const result = await res.json();
-    return result.data !== undefined ? result.data : result;
+
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
   }
 
-  async navigate(url: string, timeoutMs = 30000) {
-    return this.request("POST", "/navigate", { url, timeout: timeoutMs });
+  async init(profileId: string = "leadharvest") {
+    // Ensure profile exists (ignore if already created)
+    try {
+      await this.request("POST", "/profiles", { name: profileId });
+    } catch { /* profile may already exist */ }
+
+    const data = await this.request("POST", "/instances/start", {
+      profileId,
+      mode: "headless",
+    });
+    this.instanceId = data.id || data.instanceId;
+    if (!this.instanceId) {
+      throw new Error(`Invalid PinchTab response: ${JSON.stringify(data)}`);
+    }
   }
 
-  async evaluate<T>(expression: string): Promise<T> {
-    const data = await this.request("POST", "/evaluate", { expression });
+  /** Open a new tab and navigate to url. Sets this.tabId. */
+  async openTab(url: string): Promise<string> {
+    const data = await this.request(
+      "POST",
+      `/instances/${this.instanceId}/tabs/open`,
+      { url }
+    );
+    this.tabId = data.tabId || data.id;
+    return this.tabId;
+  }
+
+  /** Execute JavaScript in the current tab via POST /tabs/{tabId}/eval */
+  async eval<T>(expression: string): Promise<T> {
+    const data = await this.request("POST", `/tabs/${this.tabId}/eval`, {
+      expression,
+    });
     return data && data.value !== undefined ? data.value : data;
+  }
+
+  /** Get accessibility snapshot of the current tab */
+  async snapshot(filter?: string) {
+    const qs = filter ? `?filter=${filter}` : "";
+    return this.request("GET", `/tabs/${this.tabId}/snapshot${qs}`);
+  }
+
+  /** Perform a browser action (click, fill, type, press, hover) */
+  async action(kind: string, ref: string, options?: Record<string, unknown>) {
+    return this.request("POST", `/tabs/${this.tabId}/action`, {
+      kind,
+      ref,
+      ...options,
+    });
+  }
+
+  /** Extract page text */
+  async getText(): Promise<string> {
+    const data = await this.request("GET", `/tabs/${this.tabId}/text`);
+    return typeof data === "string" ? data : data.text || data.content || "";
   }
 
   async close() {
     if (this.instanceId) {
       try {
-        await fetch(`${this.baseUrl}/instances/${this.instanceId}/stop`, { method: "POST" });
+        await this.request("POST", `/instances/${this.instanceId}/stop`);
       } catch { /* ignore close failures */ }
     }
   }
 
-  // Sleep utility
   async wait(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -94,15 +121,17 @@ async function loginLinkedIn(
   email: string,
   password: string
 ): Promise<boolean> {
-  await pinchtab.navigate("https://www.linkedin.com/login");
+  await pinchtab.openTab("https://www.linkedin.com/login");
   await pinchtab.wait(2000);
 
   // Check if we are already logged in (profile persistence)
-  const isLogged = await pinchtab.evaluate(`window.location.href.includes('feed') || window.location.href.includes('mynetwork')`);
+  const isLogged = await pinchtab.eval<boolean>(
+    `window.location.href.includes('feed') || window.location.href.includes('mynetwork')`
+  );
   if (isLogged) return true;
 
-  // Perform login
-  await pinchtab.evaluate(`
+  // Perform login via eval (most reliable for LinkedIn's dynamic login form)
+  await pinchtab.eval(`
     (() => {
       const u = document.querySelector('#username');
       const p = document.querySelector('#password');
@@ -112,9 +141,9 @@ async function loginLinkedIn(
       if (btn) btn.click();
     })()
   `);
-  
+
   await pinchtab.wait(5000);
-  const currentUrl = await pinchtab.evaluate<string>(`window.location.href`);
+  const currentUrl = await pinchtab.eval<string>(`window.location.href`);
   return currentUrl.includes('feed') || currentUrl.includes('mynetwork') || currentUrl.includes('check');
 }
 
@@ -132,11 +161,11 @@ async function scrapeReactions(
   postUrl: string,
   limit: number
 ): Promise<Reactor[]> {
-  await pinchtab.navigate(postUrl);
+  await pinchtab.openTab(postUrl);
   await pinchtab.wait(4000);
 
   // Try clicking reaction buttons
-  const buttonClicked = await pinchtab.evaluate<boolean>(`
+  const buttonClicked = await pinchtab.eval<boolean>(`
     (() => {
       const selectors = [
         "button.social-details-social-counts__count-value",
@@ -168,7 +197,7 @@ async function scrapeReactions(
 
   for (let scroll = 0; scroll < 25 && reactors.length < limit; scroll++) {
     // Extract current visible reactors
-    const batch = await pinchtab.evaluate<Reactor[]>(`
+    const batch = await pinchtab.eval<Reactor[]>(`
       (() => {
         const rows = document.querySelectorAll('.artdeco-list__item');
         const items = [];
@@ -214,7 +243,7 @@ async function scrapeReactions(
     }
 
     // Scroll modal down
-    await pinchtab.evaluate(`
+    await pinchtab.eval(`
       (() => {
         for (const sel of [".artdeco-modal__content", ".social-details-reactors-modal", ".reactions-tabpanel", ".scaffold-finite-scroll__content"]) {
           const el = document.querySelector(sel);
@@ -252,12 +281,12 @@ async function scrapeProfile(
     email: "",
     fullName,
   };
-  
+
   try {
-    await pinchtab.navigate(profileUrl);
+    await pinchtab.openTab(profileUrl);
     await pinchtab.wait(3000);
 
-    const data = await pinchtab.evaluate<Partial<ProfileData>>(`
+    const data = await pinchtab.eval<Partial<ProfileData & { currentUrl: string }>>(`
       (() => {
         let jobTitle = "";
         for (const sel of [".text-body-medium.break-words", ".pv-text-details__left-panel .text-body-medium", "h2.mt1"]) {
@@ -274,7 +303,7 @@ async function scrapeProfile(
             if (firstItem) {
               const compEl = firstItem.querySelector(".t-bold span[aria-hidden='true']");
               if (compEl) company = compEl.textContent.trim();
-              
+
               const a = firstItem.querySelector("a[href*='/company/']");
               if (a) companyUrl = "https://linkedin.com" + a.getAttribute("href").split("?")[0];
             }
@@ -285,37 +314,37 @@ async function scrapeProfile(
       })()
     `);
 
-    // Fetch email via contact-info overlay (requires click and navigation overlay wait)
+    // Fetch email via contact-info overlay
     let email = "";
     try {
-      await pinchtab.evaluate(`
+      await pinchtab.eval(`
         (() => {
           const a = document.querySelector("a[href*='/overlay/contact-info/']");
           if (a) a.click();
         })()
       `);
       await pinchtab.wait(1500);
-      email = await pinchtab.evaluate<string>(`
+      email = await pinchtab.eval<string>(`
         (() => {
           const e = document.querySelector("a[href^='mailto:']");
           if (e) return e.getAttribute("href").replace("mailto:", "").trim();
           return "";
         })()
       `);
-    } catch {}
+    } catch { /* contact info may not be available */ }
 
-    const resolvedUrl = (data as any).currentUrl || profileUrl;
+    const resolvedUrl = data?.currentUrl || profileUrl;
     const finalUrl = (resolvedUrl.includes("/in/") && !resolvedUrl.includes("ACoA"))
       ? resolvedUrl.split("?")[0].replace(/\/$/, "")
       : profileUrl;
 
-    return { 
-      linkedinUrl: finalUrl, 
-      jobTitle: data?.jobTitle || "", 
-      company: data?.company || "", 
-      companyUrl: data?.companyUrl || "", 
-      email: email || "", 
-      fullName 
+    return {
+      linkedinUrl: finalUrl,
+      jobTitle: data?.jobTitle || "",
+      company: data?.company || "",
+      companyUrl: data?.companyUrl || "",
+      email: email || "",
+      fullName,
     };
   } catch {
     return empty;
@@ -431,8 +460,8 @@ export const scrapeLinkedInPost = task({
     try {
       try {
         await pinchtab.init("leadharvest");
-      } catch (e: any) {
-        emit({ type: "error", message: `❌ Failed connecting to PinchTab: ${e.message}`});
+      } catch (e: unknown) {
+        emit({ type: "error", message: `❌ Failed connecting to PinchTab: ${(e as Error)?.message}`});
         await taskMeta.set("done" as never, true as never).flush();
         return;
       }
