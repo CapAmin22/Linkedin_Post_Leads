@@ -13,6 +13,9 @@ npm install
 # Development (Next.js on port 3000)
 npm run dev
 
+# PinchTab browser-automation service (required for scraping; default http://localhost:9867)
+# Must be running before Trigger.dev can execute the scrape task.
+
 # Trigger.dev background task runner (required alongside npm run dev for local scraping)
 npx trigger.dev@latest dev
 
@@ -33,7 +36,7 @@ No test suite is configured. CI runs `npm run lint` + `npm run build`.
 2. `/api/scrape` dispatches a Trigger.dev background job and returns a `jobId`
 3. `ScrapeForm` polls `/api/job-status` every 8s for up to 10 minutes
 4. The Trigger.dev task (`src/trigger/scrape.ts`) orchestrates:
-   - Playwright headless Chromium with anti-detection (custom UA, hidden `webdriver` flag, timezone spoofing)
+   - Browser automation via the **PinchTab HTTP API** (`PinchTabAPI` class at the top of the file) — opens a named profile (`leadharvest`) via `POST /instances/start`, drives tabs with `/tabs/{id}/eval` and `/tabs/{id}/action`, and persists the LinkedIn session across runs. Configured via `PINCHTAB_URL` (defaults to `http://localhost:9867`).
    - LinkedIn login → scrape post reactions modal → deep-dive each profile page
    - AI parsing waterfall: **Groq** (llama-3.3-70b) → **Gemini 2.0 Flash** → **OpenAI gpt-4o-mini** → regex fallback
    - Writes enriched leads to Supabase `scraped_leads` table via service role (bypasses RLS)
@@ -55,7 +58,7 @@ No test suite is configured. CI runs `npm run lint` + `npm run build`.
 | `src/middleware.ts` | Next.js middleware entry point — calls the auth guard |
 | `src/lib/supabase/middleware.ts` | Auth guard logic: redirects unauthenticated users from `/dashboard` to `/login` |
 | `schema.sql` | Supabase table definition + Row-Level Security policies |
-| `trigger.config.ts` | Trigger.dev project config (600s max duration, Playwright build extension) |
+| `trigger.config.ts` | Trigger.dev project config (600s max duration) |
 
 ## Environment Variables
 
@@ -70,12 +73,15 @@ DATABASE_URL
 # Trigger.dev
 TRIGGER_SECRET_KEY
 
+# PinchTab (browser automation service)
+PINCHTAB_URL  # defaults to http://localhost:9867
+
 # AI APIs (waterfall: Groq → Gemini → OpenAI → regex)
 GROQ_API_KEY
 GEMINI_API_KEY
 OPENAI_API_KEY
 
-# LinkedIn credentials for Playwright login
+# LinkedIn credentials for the scraper (burner account)
 NEXT_PUBLIC_LINKEDIN_EMAIL
 NEXT_PUBLIC_LINKEDIN_PASSWORD
 
@@ -89,8 +95,8 @@ HUNTER_API_KEY
 
 - **Next.js 16** (App Router, React 19, TypeScript strict mode)
 - **Tailwind CSS v4** + **shadcn/ui** (style: `base-nova`)
-- **Playwright 1.58** — browser automation in the Trigger.dev task (not in Next.js routes)
-- **Trigger.dev v3** — background jobs, bypasses Vercel's function timeout
+- **PinchTab HTTP API** — external browser-automation service driven over HTTP; not an npm dependency, runs separately at :9867
+- **Trigger.dev v4** (`@trigger.dev/sdk` 4.x) — background jobs, bypasses Vercel's function timeout. `trigger.config.ts` uses the `@trigger.dev/sdk/v3` compat import path.
 - **Supabase** — PostgreSQL + Auth + Row-Level Security (users see only their own leads)
 
 ## Database Schema
@@ -110,7 +116,8 @@ Central table: `scraped_leads` (defined in `schema.sql`)
 
 ## Important Constraints
 
-- The `scraper/` directory contains a legacy Python FastAPI service that has been superseded by the Playwright approach in `src/trigger/scrape.ts`. Do not extend it.
+- The `scraper/` directory contains a legacy Python FastAPI service that has been superseded by the PinchTab-based approach in `src/trigger/scrape.ts`. Do not extend it.
+- The PinchTab service must be running locally (or reachable at `PINCHTAB_URL`) for the scrape task to succeed; otherwise `PinchTabAPI` calls fail immediately.
 - Trigger.dev tasks run in a separate process — they cannot import Next.js server utilities directly; use the service role Supabase client from `src/lib/supabase/server.ts`.
 - Background tasks write to Supabase using the **service role** (to bypass RLS). The Next.js API routes and components use the **anon key** (subject to RLS).
 - `NEXT_PUBLIC_LINKEDIN_EMAIL` / `NEXT_PUBLIC_LINKEDIN_PASSWORD` are exposed to the browser bundle — these are burner credentials for the scraper account, not user credentials.
